@@ -1,0 +1,72 @@
+<!-- sn_list 模態框 -->
+<div class="modal fade" id="snList">
+	<div class="modal-dialog modal-lg">
+		<div class="modal-content">
+
+			<div class="modal-header">
+				<h4 class="modal-title">sn_list</h4>
+				<button type="button" class="close" data-dismiss="modal">&times;</button>
+			</div>
+
+			<div class="modal-body setting-wrapper">
+				<dl>
+					<dt>格式：</dt>
+					<dd><code>
+							@分類(可空)<br>
+							sn碼 下載模式(可空) 	&lt;重新命名&gt;(可空) #注釋(可空)
+						</code></dd>
+
+					<dt>說明</dt>
+					<dd>注釋 <kbd>#</kbd> 後面的所有字元程式均不會讀取, 可以用於標記番劇名</dd>
+					<dd>在一排番劇列表的上方 <kbd>@</kbd> 開頭後面的字元將會作為番劇的分類名, 番劇會歸類在此分類名的資料夾下</dd>
+					<dd>若單獨 <kbd>@</kbd> 表示不分類</dd>
+					<dd>用 <kbd>&lt;</kbd> 與 <kbd>&gt;</kbd> 將自訂的番劇名框起來, 下載時將會使用這個名字作為番劇目錄名</dd>
+				</dl>
+
+				<form>
+					<div class="input-group mb-3 input-group-lg">
+						<textarea class="form-control" rows="5" id="sn_list"></textarea>
+					</div>
+				</form>
+			</div>
+
+			<div class="modal-footer">
+				<button type="button" class="btn btn-success" onclick="postSnList()">提交</button>
+				<button type="button" class="btn btn-secondary" data-dismiss="modal">關閉</button>
+			</div>
+
+		</div>
+	</div>
+</div>
+
+<!-- 提交請求模態框 -->
+<div class="modal fade" id="uploadStatus">
+	<div class="modal-dialog modal-sm" role="document">
+		<div class="modal-content">
+
+			<div class="modal-header">
+				<h4 class="modal-title">提交結果</h4>
+				<button type="button" class="close" data-dismiss="modal">&times;</button>
+			</div>
+
+			<div class="modal-body setting-wrapper">
+				<center>
+					<div id="uploadOk" style="display: none;">
+						<i class="far fa-check-circle fa-4x" style="color: #28A745;"></i>
+						<p class="upload-status">配置已成功提交</p>
+					</div>
+
+					<div id="uploadFailed" style="display: block;">
+						<i class="fas fa-exclamation-circle fa-4x" style="color: #DC3545;"></i>
+						<p class="upload-status">配置提交失敗</p>
+					</div>
+				</center>
+			</div>
+
+			<div class="modal-footer">
+				<button type="button" class="btn btn-secondary" data-dismiss="modal">關閉</button>
+			</div>
+
+		</div>
+	</div>
+</div>

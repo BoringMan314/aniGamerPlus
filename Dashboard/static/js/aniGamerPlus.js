@@ -20,8 +20,6 @@ $.ajax({
 	}
 });
 
-showSnList();
-
 function parseProxy(proxy) {
 	proxy_protocol = proxy.replace(/:\/\/.*/i, '').toUpperCase();
 	if (/.*@.*/.test(proxy)) {
@@ -160,89 +158,4 @@ function readSettings() {
 function getUA(){
 	$('#ua').val(navigator.userAgent);
 	alert("已取得當前瀏覽器UA");
-}
-
-function readManualConfig(){
-	var manualData = {};
-	var link = $('#manual_link').val();
-	if (link.length == 0) {
-		alert('請輸入影片連結！')
-	} else {
-		var sn = link.replace(/(https:\/\/)?ani\.gamer\.com\.tw\/animeVideo\.php\?sn=/i, '');
-		manualData['sn'] = sn;
-		
-		var mode = $("#manual_mode").val();
-		manualData['mode'] = mode;
-		
-		var resolution = $('#manual_resolution').val().replace('P', '');
-		manualData['resolution'] = resolution;
-		
-		var classify = $('#manual_classify').is(":checked");
-		manualData['classify'] = classify;
-		
-		var thread = $('#manual_thread_limit').val();
-		manualData['thread'] = thread;
-
-		var danmu = $('#manual_danmu').is(":checked");
-		manualData['danmu'] = danmu;
-		
-		$.ajax({
-			url: '/manualTask',
-			type: 'post',
-			dataType: 'json',
-			headers: {
-				"Content-Type": "application/json;charset=utf-8"
-			},
-			contentType: 'application/json; charset=utf-8',
-			data: JSON.stringify(manualData),
-			success: function(data) {
-				// 向使用者提示提交成功
-				$('#uploadOk').show();
-				$('#uploadFailed').hide();
-				$('#uploadStatus').modal();
-				reloadSetting();
-			},
-			error:function(status){
-				// 向使用者提示提交失敗
-				$('#uploadOk').hide();
-				$('#uploadFailed').show();
-				$('#uploadStatus').modal();
-			}
-		})
-	}
-	
-}
-
-function postSnList(){
-	var sn_list = $('#sn_list').val();
-	
-	$.ajax({
-		url: '/sn_list',
-		type: 'post',
-		dataType: 'text',
-		headers: {
-			"Content-Type": "text/plain; charset=utf-8"
-		},
-		contentType: 'text/plain; charset=utf-8',
-		data: sn_list,
-		success: function(data) {
-			// 向使用者提示提交成功
-			$('#uploadOk').show();
-			$('#uploadFailed').hide();
-			$('#uploadStatus').modal();
-			showSnList();
-		},
-		error:function(status){
-			// 向使用者提示提交失敗
-			$('#uploadOk').hide();
-			$('#uploadFailed').show();
-			$('#uploadStatus').modal();
-		}
-	})
-}
-
-function showSnList(){
-	$.get("data/sn_list", function(data) {
-		$("#sn_list").val(data);
-	})
 }

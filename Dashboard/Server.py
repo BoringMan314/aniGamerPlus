@@ -90,12 +90,12 @@ with open(id_list_path, 'r', encoding='utf-8') as f:
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    return render_template('index.html', active_page='settings')
 
 
 @app.route('/monitor')
 def monitor():
-    return render_template('monitor.html')
+    return render_template('monitor.html', active_page='monitor')
 
 
 @app.route('/data/config.json', methods=['GET'])
@@ -185,7 +185,7 @@ def tasks_progress(ws):
     # 推送任務進度資料
     # https://blog.csdn.net/sinat_32651363/article/details/87912701
     while not ws.closed:
-        msg = json.dumps(Config.tasks_progress_rate)
+        msg = json.dumps(Config.get_tasks_progress_rate())
         try:
             ws.send(msg)
             time.sleep(1)

@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.3'
+aniGamerPlus_version = 'v24.9.4'
 latest_config_version = 17.3
 latest_database_version = 2.0
 cookie = None
@@ -32,6 +32,39 @@ max_multi_downloading_segment = 5
 tasks_progress_rate = {}  # 儲存任務進度, 供面板使用,
 # 格式: {sn: {'rate': 任務進度百分比(float), 'status': 任務狀態, 'filename': 檔名} }
 # 任務狀態有:  '正在下載' '正在解密合併' '正在移至番劇目錄' '任務失敗, 等待重啟' '等待下載'
+tasks_progress_lock = threading.Lock()
+
+
+def update_task_monitor(sn, rate=None, status=None, filename=None):
+    sn = int(sn)
+    with tasks_progress_lock:
+        entry = tasks_progress_rate.get(sn)
+        if entry is None:
+            entry = {'rate': 0, 'status': '等待下載', 'filename': 'sn=' + str(sn)}
+            tasks_progress_rate[sn] = entry
+        if rate is not None:
+            entry['rate'] = rate
+        if status is not None:
+            entry['status'] = status
+        if filename:
+            entry['filename'] = filename
+
+
+def set_task_waiting(sn, filename=''):
+    update_task_monitor(sn, rate=0, status='等待下載', filename=filename or ('sn=' + str(sn)))
+
+
+def set_task_failed(sn, status='任務失敗'):
+    update_task_monitor(sn, rate=0, status=status)
+
+
+def set_task_completed(sn, filename=''):
+    update_task_monitor(sn, rate=100, status='下載完成', filename=filename)
+
+
+def get_tasks_progress_rate():
+    with tasks_progress_lock:
+        return dict(tasks_progress_rate)
 
 
 def __color_print(sn, err_msg, detail='', status=0, no_sn=False, display=True):

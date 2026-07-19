@@ -733,7 +733,7 @@ class Anime:
             finished_chunk_counter = finished_chunk_counter + 1
             progress_rate = float(finished_chunk_counter / total_chunk_num * 100)
             progress_rate = round(progress_rate, 2)
-            Config.tasks_progress_rate[int(self._sn)]['rate'] = progress_rate
+            Config.update_task_monitor(self._sn, rate=progress_rate)
 
             if self.realtime_show_file_size:
                 sys.stdout.write('\r正在下載: sn=' + str(self._sn) + ' ' + filename + ' ' + str(progress_rate) + '%  ')
@@ -781,7 +781,7 @@ class Anime:
             sys.stdout.write('\n')
             sys.stdout.flush()
         err_print(self._sn, '下載狀態', filename + ' 下載完成, 正在解密合併……')
-        Config.tasks_progress_rate[int(self._sn)]['status'] = '下載完成'
+        Config.update_task_monitor(self._sn, status='正在解密合併', rate=100)
 
         # 構造 ffmpeg 命令
         ffmpeg_cmd = [self._ffmpeg_path,
@@ -944,7 +944,7 @@ class Anime:
             self._bangumi_name = self._bangumi_name.replace(bangumi_name, rename)
 
         # 下載任務開始
-        Config.tasks_progress_rate[int(self._sn)] = {'rate': 0, 'filename': '《'+self.get_title()+'》', 'status': '正在解析'}
+        Config.update_task_monitor(self._sn, rate=0, status='正在解析', filename='《'+self.get_title()+'》')
 
         try:
             self.__get_m3u8_dict()  # 取得 m3u8 列表
@@ -1036,16 +1036,14 @@ class Anime:
         self.video_resolution = int(resolution)
 
         # 解析完成, 開始下載
-        Config.tasks_progress_rate[int(self._sn)]['status'] = '正在下載'
-        Config.tasks_progress_rate[int(self._sn)]['filename'] = self.get_filename()
+        Config.update_task_monitor(self._sn, status='正在下載', filename=self.get_filename())
 
         if self._settings['segment_download_mode']:
             self.__segment_download_mode(resolution)
         else:
             self.__ffmpeg_download_mode(resolution)
 
-        # 任務完成, 從任務進度表中刪除
-        del Config.tasks_progress_rate[int(self._sn)]
+        Config.set_task_completed(self._sn, self.get_filename())
 
         # 下載彈幕
         if self._danmu:

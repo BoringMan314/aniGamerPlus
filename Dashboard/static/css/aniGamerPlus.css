@@ -113,6 +113,46 @@ body {
 	margin-left: 3rem;
 }
 
+#dashboard-nav.navbar {
+	padding: 0.5rem 1rem;
+	font-size: 1rem;
+	line-height: 1.5;
+}
+
+#dashboard-nav .navbar-brand {
+	padding-top: 0.3125rem;
+	padding-bottom: 0.3125rem;
+	margin-right: 1rem;
+	font-size: 1.25rem;
+	line-height: inherit;
+	white-space: nowrap;
+}
+
+#dashboard-nav .navbar-nav .nav-link {
+	padding: 0.5rem 1rem;
+	font-size: 1rem;
+	line-height: 1.5;
+}
+
+#dashboard-nav .navbar-nav .nav-link.dashboard-nav-action {
+	margin-left: 0;
+	padding: 0.375rem 0.75rem;
+	color: #fff;
+	background-color: #28a745;
+	border-radius: 0.25rem;
+}
+
+#dashboard-nav .navbar-nav .nav-link.dashboard-nav-action:hover,
+#dashboard-nav .navbar-nav .nav-link.dashboard-nav-action:focus {
+	color: #fff;
+	background-color: #218838;
+}
+
+.navbar-dark .navbar-nav .nav-link.active {
+	color: #fff;
+	font-weight: bold;
+}
+
 .upload-status {
 	padding: 2rem 0 0;
 	font-family: "Microsoft YaHei";

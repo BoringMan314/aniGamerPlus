@@ -254,6 +254,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         upload_quit()
 
     # =====下載模組 =====
+    Config.set_task_waiting(sn)
     thread_limiter.acquire()  # 並發下載限制器
     anime = build_anime(sn)
 
@@ -261,6 +262,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         queue.pop(sn)
         processing_queue.remove(sn)
         thread_limiter.release()
+        Config.set_task_failed(sn)
         err_print(sn, '任務失敗', '從任務佇列中移除, 等待下次更新重試.', status=1)
         sys.exit(1)
 
@@ -282,8 +284,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         thread_limiter.release()
         err_msg_detail = 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.'
         err_print(sn, '任務失敗', err_msg_detail, status=1)
-        if int(sn) in Config.tasks_progress_rate.keys():
-            del Config.tasks_progress_rate[int(sn)]  # 任務失敗, 不在監控此任務進度
+        Config.set_task_failed(sn)
         sys.exit(1)
 
     update_db(anime)  # 下載完成後, 更新資料庫
@@ -393,11 +394,14 @@ def check_tasks():
 
 def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_size=False, classify=True):
     # 僅下載,不運算元據庫
+    Config.set_task_waiting(sn)
     thread_limiter.acquire()
     err_counter = 0
 
     anime = build_anime(sn)
     if anime['failed']:
+        Config.set_task_failed(sn)
+        thread_limiter.release()
         sys.exit(1)
     anime = anime['anime']
 
@@ -415,14 +419,12 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
         if err_counter >= 3:
             err_print(sn, '終止任務', 'title=' + anime.get_title()+' 任務失敗達三次! 終止任務!', status=1)
             thread_limiter.release()
-            if int(sn) in Config.tasks_progress_rate.keys():
-                del Config.tasks_progress_rate[int(sn)]
+            Config.set_task_failed(sn)
             return
         else:
             err_print(sn, '任務失敗', 'title=' + anime.get_title() + ' 10s後自動重啟,最多重試三次', status=1)
             err_counter = err_counter + 1
-            if int(sn) in Config.tasks_progress_rate.keys():
-                Config.tasks_progress_rate[int(sn)]['status'] = '失敗! 重啟中'
+            Config.update_task_monitor(sn, status='失敗! 重啟中')
             time.sleep(10)
             anime.renew()
 

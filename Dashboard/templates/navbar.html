@@ -1,0 +1,23 @@
+<nav id="dashboard-nav" class="navbar navbar-expand-md bg-dark navbar-dark fixed-top">
+	<a class="navbar-brand" href="./">aniGamerPlus控制臺</a>
+
+	<button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#collapsibleNavbar">
+		<span class="navbar-toggler-icon"></span>
+	</button>
+	<div class="collapse navbar-collapse" id="collapsibleNavbar">
+		<ul class="navbar-nav align-items-md-center">
+			<li class="nav-item my-navbar">
+				<a class="nav-link{% if active_page == 'settings' %} active{% endif %}" href="./">自動模式設定</a>
+			</li>
+			<li class="nav-item my-navbar">
+				<a class="nav-link{% if active_page == 'monitor' %} active{% endif %}" href="./monitor">任務監控中心</a>
+			</li>
+			<li class="nav-item my-navbar">
+				<a class="nav-link" href="#" data-toggle="modal" data-target="#snList">sn_list</a>
+			</li>
+			<li class="nav-item my-navbar">
+				<a class="nav-link dashboard-nav-action" href="#" data-toggle="modal" data-target="#manualTasks">新增手動任務</a>
+			</li>
+		</ul>
+	</div>
+</nav>

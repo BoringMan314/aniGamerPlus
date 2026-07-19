@@ -95,7 +95,7 @@ def home():
 
 @app.route('/monitor')
 def monitor():
-    return render_template('monitor.html', active_page='monitor')
+    return render_template('index.html', active_page='monitor')
 
 
 @app.route('/data/config.json', methods=['GET'])

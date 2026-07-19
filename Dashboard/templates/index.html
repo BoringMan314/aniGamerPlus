@@ -7,20 +7,25 @@
 		<link rel="stylesheet" href="../static/css/bootstrap-select.min.css" />
 		<script src="../static/js/bootstrap-select.min.js"></script>
 		<link rel="stylesheet" href="../static/css/fontawesome.all.min.css" />
+		<link rel="stylesheet" href="../static/layui/css/layui.css">
 		<link rel="stylesheet" href="../static/css/aniGamerPlus.css" />
 		<script src="../static/js/sn_list.js"></script>
 		<script src="../static/js/manual_task.js"></script>
 		<script src="../static/js/settings_id_list.js"></script>
 		<script src="../static/js/aniGamerPlus.js"></script>
+		<script src="../static/layui/layui.js"></script>
+		<script src="../static/js/monitor.js"></script>
+		<script src="../static/js/dashboard.js"></script>
 		<title>aniGamerPlus控制臺</title>
 	</head>
-	<body>
+	<body data-active-page="{{ active_page }}">
 		{% include 'navbar.html' %}
 
 		{% include 'manual_task_modal.html' %}
 		{% include 'sn_list_modal.html' %}
 
 		<!-- 自動模式配置介面主體 -->
+		<div id="page-settings"{% if active_page == 'monitor' %} style="display: none;"{% endif %}>
 		<div class="setting-wrapper mx-auto" style="padding-top: 70px;">
 			<form>
 				<div class="row">
@@ -276,6 +281,11 @@
 				</center>
 
 			</form>
+		</div>
+		</div>
+
+		<div id="page-monitor"{% if active_page != 'monitor' %} style="display: none;"{% endif %}>
+		{% include 'monitor_panel.html' %}
 		</div>
 
 		<script>

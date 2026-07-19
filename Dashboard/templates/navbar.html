@@ -7,10 +7,10 @@
 	<div class="collapse navbar-collapse" id="collapsibleNavbar">
 		<ul class="navbar-nav align-items-md-center">
 			<li class="nav-item my-navbar">
-				<a class="nav-link{% if active_page == 'settings' %} active{% endif %}" href="./">自動模式設定</a>
+				<a class="nav-link dashboard-nav-link{% if active_page == 'settings' %} active{% endif %}" href="./" data-page="settings">自動模式設定</a>
 			</li>
 			<li class="nav-item my-navbar">
-				<a class="nav-link{% if active_page == 'monitor' %} active{% endif %}" href="./monitor">任務監控中心</a>
+				<a class="nav-link dashboard-nav-link{% if active_page == 'monitor' %} active{% endif %}" href="./monitor" data-page="monitor">任務監控中心</a>
 			</li>
 			<li class="nav-item my-navbar">
 				<a class="nav-link" href="#" data-toggle="modal" data-target="#snList">sn_list</a>

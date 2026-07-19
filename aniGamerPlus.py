@@ -482,11 +482,32 @@ def __get_danmu_only(sn, bangumi_name, video_path):
     thread_limiter.release()
 
 
+def _normalize_thread_limit(limit):
+    limit = int(limit)
+    if limit > Config.get_max_multi_thread():
+        limit = Config.get_max_multi_thread()
+    elif limit < 1:
+        limit = 1
+    return limit
+
+
+def init_download_limiter(limit=None):
+    """建立程式生命週期內共用的下載 limiter（sn_list 自動模式 + Web 手動任務）。"""
+    global thread_limiter
+    if limit is None:
+        limit = settings['multi-thread']
+    thread_limiter = threading.Semaphore(_normalize_thread_limit(limit))
+
+
+def reset_download_limiter_for_cli(limit):
+    """僅命令列單次執行時設定 limiter；該路徑會 sys.exit，不與自動模式共存。"""
+    global thread_limiter
+    thread_limiter = threading.Semaphore(_normalize_thread_limit(limit))
+
+
 def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
           cui_save_dir='', classify=True, get_info=False, user_cmd=False, realtime_show=True, cui_danmu=False):
-    global thread_limiter
-    thread_limiter = threading.Semaphore(cui_thread_limit)
-
+    # 不可在此重置 thread_limiter，否則後續手動/sn_list 任務會插隊
     global danmu
     danmu = cui_danmu
 
@@ -853,7 +874,7 @@ working_dir = settings['working_dir']
 db_path = os.path.join(working_dir, 'aniGamer.db')
 queue = {}  # 儲存 sn 相關資訊, {'tag': TAG, 'rename': RENAME}, rename,
 processing_queue = []
-thread_limiter = threading.Semaphore(settings['multi-thread'])  # 下載並發限制器
+init_download_limiter()
 upload_limiter = threading.Semaphore(settings['multi_upload'])  # 並發上傳限制器
 db_locker = threading.Semaphore(1)
 thread_tasks = []
@@ -981,7 +1002,6 @@ if __name__ == '__main__':
         if arg.information_only:
             # 為避免排版混亂, 僅顯示資訊時強制為單執行緒
             thread_limit = 1
-            thread_limiter = threading.Semaphore(thread_limit)
         else:
             if arg.thread_limit:
                 # 使用者設定並發數
@@ -992,6 +1012,8 @@ if __name__ == '__main__':
                     thread_limit = arg.thread_limit
             else:
                 thread_limit = settings['multi-thread']
+
+        reset_download_limiter_for_cli(thread_limit)
 
         if settings['use_proxy']:
             __init_proxy()

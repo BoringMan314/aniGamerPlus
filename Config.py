@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.5'
+aniGamerPlus_version = 'v24.9.6'
 latest_config_version = 17.3
 latest_database_version = 2.0
 cookie = None
@@ -737,11 +737,39 @@ def test_cookie():
     read_cookie(log=True)
 
 
+def __parse_cookie_line(cookie_line):
+    cookies = {}
+    for part in cookie_line.replace('\n', '').split(';'):
+        part = part.strip()
+        if not part or '=' not in part:
+            continue
+        key, value = part.split('=', 1)
+        cookies[key] = quote(value, safe='') if re.match(r'[\u4e00-\u9fa5]', value) else value
+    return cookies
+
+
+def __cookie_dict_to_string(cookie_dict):
+    return '; '.join([key + '=' + str(value) for key, value in cookie_dict.items()])
+
+
+def __read_cookie_file_dict():
+    if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
+        return {}
+    check_encoding(cookie_path)
+    with open(cookie_path, 'r', encoding='utf-8') as f:
+        for line in f.readlines():
+            if not line.isspace():
+                cookies = __parse_cookie_line(line)
+                cookies.pop('ckBH_lastBoard', 404)
+                return cookies
+    return {}
+
+
 def read_cookie(log=False):
     # 若 cookie 已載入記憶體，則直接傳回
     global cookie
     if cookie is not None:
-        return cookie
+        return dict(cookie)
     # 相容舊版cookie命名
     old_cookie_path = cookie_path.replace('cookie.txt', 'cookies.txt')
     if os.path.exists(old_cookie_path):
@@ -762,13 +790,12 @@ def read_cookie(log=False):
         with open(cookie_path, 'r', encoding='utf-8') as f:
             for line in f.readlines():
                 if not line.isspace():  # 跳過空白行
-                    cookies = line.replace('\n', '')  # 刪除換行符
-                    cookies = dict([list(map(lambda x: quote(x, safe='') if re.match(r'[\u4e00-\u9fa5]', x) else x,  l.split("=", 1))) for l in cookies.split("; ")])
+                    cookies = __parse_cookie_line(line)
                     cookies.pop('ckBH_lastBoard', 404)
                     cookie = cookies
                     if log:
                         __color_print(0, '讀取cookie', detail='已讀取cookie', no_sn=True, display=False)
-                    return cookie  # cookie僅一行, 讀到後馬上return
+                    return dict(cookie)  # cookie僅一行, 讀到後馬上return
     else:
         __color_print(0, '讀取cookie', detail='未發現cookie檔案', no_sn=True, display=False)
         cookie = {}
@@ -802,21 +829,33 @@ cookie_write_lock = threading.Lock()
 
 
 def renew_cookies(new_cookie, log=True):
+    return renew_cookies_if_current(new_cookie, log=log)
+
+
+def renew_cookies_if_current(new_cookie, previous_baharune=None, log=True):
     global cookie
     if not new_cookie:
         return
-    new_cookie_str = ''
-    for key, value in new_cookie.items():
-        new_cookie_str = new_cookie_str + key + '=' + str(value) + '; '
-    new_cookie_str = new_cookie_str[0:-2]
+    new_cookie = dict(new_cookie)
+    new_cookie_str = __cookie_dict_to_string(new_cookie)
     with cookie_write_lock:
         cookie = None  # 重置cookie
         try:
-            with open(cookie_path, 'r', encoding='utf-8') as f:
-                if f.read() == new_cookie_str:
-                    return
+            current_cookie = __read_cookie_file_dict()
         except BaseException:
-            pass
+            current_cookie = {}
+
+        current_baharune = current_cookie.get('BAHARUNE')
+        new_baharune = new_cookie.get('BAHARUNE')
+        if previous_baharune and current_baharune and new_baharune:
+            if current_baharune != previous_baharune and current_baharune != new_baharune:
+                if log:
+                    __color_print(0, '略過舊cookie寫回，cookie.txt已被其他任務更新', no_sn=True, display=False)
+                return
+
+        if current_cookie and __cookie_dict_to_string(current_cookie) == new_cookie_str:
+            return
+
         try_counter = 0
         while True:
             try:

@@ -14,6 +14,7 @@ var id_list = [
 	'customized_video_filename_prefix', 
 	'customized_video_filename_suffix',
 	'ua', 
+	'prevent_guest_download',
 	'use_mobile_api',
 	'danmu',
 	'use_proxy', 

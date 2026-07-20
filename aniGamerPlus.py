@@ -21,7 +21,7 @@ import pip_system_certs.wrapt_requests
 import requests
 
 import Config
-from Anime import Anime, TryTooManyTimeError
+from Anime import Anime, TryTooManyTimeError, NonRetryableDownloadError
 from ColorPrint import err_print
 from Danmu import Danmu
 
@@ -271,6 +271,13 @@ def worker(sn, sn_info, realtime_show_file_size=False):
     try:
         anime.download(settings['download_resolution'], bangumi_tag=bangumi_tag, rename=rename,
                        realtime_show_file_size=realtime_show_file_size, classify=settings['classify_bangumi'])
+    except NonRetryableDownloadError as e:
+        queue.pop(sn)
+        processing_queue.remove(sn)
+        thread_limiter.release()
+        Config.set_task_failed(sn)
+        err_print(sn, '任務失敗', str(e), status=1)
+        sys.exit(1)
     except BaseException as e:
         # 兜一下各種奇奇怪怪的錯誤
         err_print(sn, '下載異常', '發生未知錯誤: '+str(e), status=1)
@@ -410,6 +417,11 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
             anime.download(dl_resolution, dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
         else:
             anime.download(settings['download_resolution'], dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
+    except NonRetryableDownloadError as e:
+        err_print(sn, '任務失敗', str(e), status=1)
+        Config.set_task_failed(sn)
+        thread_limiter.release()
+        return
     except BaseException as e:
         err_print(sn, '下載異常', '發生未知異常: ' + str(e), status=1)
         err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
@@ -433,6 +445,11 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
                     anime.download(dl_resolution, dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
                 else:
                     anime.download(settings['download_resolution'], dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
+            except NonRetryableDownloadError as e:
+                err_print(sn, '任務失敗', str(e), status=1)
+                Config.set_task_failed(sn)
+                thread_limiter.release()
+                return
             except BaseException as e:
                 err_print(sn, '下載異常', '發生未知異常: ' + str(e), status=1)
                 err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)

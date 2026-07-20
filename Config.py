@@ -23,8 +23,8 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.6'
-latest_config_version = 17.3
+aniGamerPlus_version = 'v24.9.7'
+latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
 max_multi_thread = 5
@@ -141,6 +141,7 @@ def __init_settings():
                 'zerofill': 1,  # 劇集名補零, 此項填補足位數, 小於等於 1 即不補零
                 # cookie的自動重新整理對 UA 有檢查
                 'ua': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36",
+                'prevent_guest_download': False,  # 訪客模式不下載
                 'use_proxy': False,
                 'proxy': 'http://user:passwd@example.com:1000',  # 代理功能, config_version v13.0 刪除鏈式代理
                 "no_proxy_akamai": False,  # 不代理 akamai CDN
@@ -258,6 +259,10 @@ def __update_settings(old_settings):  # 升級配置檔案
 
     if 'ua' not in new_settings.keys():  # v4.2 新增 UA 配置
         new_settings['ua'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.96 Safari/537.36"
+
+    if 'prevent_guest_download' not in new_settings.keys():
+        # v24.9.7 新增訪客模式不下載
+        new_settings['prevent_guest_download'] = False
 
     if 'classify_bangumi' not in new_settings.keys():
         new_settings['classify_bangumi'] = True  # v5.0 新增是否建立番劇目錄開關

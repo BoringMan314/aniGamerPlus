@@ -22,6 +22,14 @@ class TryTooManyTimeError(BaseException):
     pass
 
 
+class NonRetryableDownloadError(BaseException):
+    pass
+
+
+class ResolutionNotFoundError(NonRetryableDownloadError):
+    pass
+
+
 class Anime:
     def __init__(self, sn, debug_mode=False, gost_port=34173):
         self._settings = Config.read_settings()
@@ -321,6 +329,11 @@ class Anime:
         except AttributeError:
             pass
 
+    def __has_login_cookie(self):
+        cookies = dict(self._cookies or {})
+        cookies.update(self.__session_cookie_dict())
+        return 'BAHAID' in cookies
+
     def __request(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx = False):
         # 設定 header
         current_header = self._req_header
@@ -499,8 +512,7 @@ class Anime:
 
         def check_no_ad(error_count=10):
             if error_count == 0:
-                err_print(self._sn, '廣告去除失敗! 請向開發者提交 issue!', status=1)
-                sys.exit(1)
+                raise NonRetryableDownloadError('廣告去除失敗! 請向開發者提交 issue!')
 
             req = "https://ani.gamer.com.tw/ajax/token.php?sn=" + str(
                 self._sn) + "&device=" + self._device_id + "&hash=" + random_string(12)
@@ -523,8 +535,7 @@ class Anime:
                             self._settings['ads_time'] = ads_time
                         Config.write_settings(self._settings)  # 儲存到配置檔案
             else:
-                err_print(self._sn, '遭到動畫瘋地區限制, 你的IP可能不被動畫瘋認可!', status=1)
-                sys.exit(1)
+                raise NonRetryableDownloadError('遭到動畫瘋地區限制, 你的IP可能不被動畫瘋認可!')
 
         def parse_playlist():
             playlist_url = ""
@@ -557,8 +568,10 @@ class Anime:
         if 'error' in user_info.keys():
             msg = '《' + self._title + '》 '
             msg = msg + 'code=' + str(user_info['error']['code']) + ' message: ' + user_info['error']['message']
-            err_print(self._sn, '收到錯誤', msg, status=1)
-            sys.exit(1)
+            raise NonRetryableDownloadError(msg)
+
+        if self._settings['prevent_guest_download'] and not self.__has_login_cookie():
+            raise NonRetryableDownloadError('已啟用訪客模式不下載, 任務停止')
 
         if not user_info['vip']:
             # 如果使用者不是 VIP, 那麼等待廣告(20s)
@@ -566,8 +579,7 @@ class Anime:
             # 20200806 網站更新，最低廣告更新時間從20s增加到25s https://github.com/miyouzi/aniGamerPlus/issues/55
 
             if self._settings['only_use_vip']:
-                 err_print(self._sn, '非VIP','因為已設定只使用VIP下載，故強制停止', status=1, no_sn=True)
-                 sys.exit(1)
+                 raise NonRetryableDownloadError('因為已設定只使用VIP下載，故強制停止')
 
             if self._settings['use_mobile_api']:
                 ad_time = self._settings['mobile_ads_time']  # APP解析廣告解析時間不同
@@ -1028,8 +1040,7 @@ class Anime:
             if self._settings['lock_resolution']:
                 # 如果使用者設定鎖定清晰度, 則下載取消
                 err_msg_detail = '指定清晰度不存在, 因當前鎖定了清晰度, 下載取消. 可用的清晰度: ' + 'P '.join(self._m3u8_dict.keys()) + 'P'
-                err_print(self._sn, '任務狀態', err_msg_detail, status=1)
-                return
+                raise ResolutionNotFoundError(err_msg_detail)
 
             resolution_list = map(lambda x: int(x), self._m3u8_dict.keys())
             resolution_list = list(resolution_list)

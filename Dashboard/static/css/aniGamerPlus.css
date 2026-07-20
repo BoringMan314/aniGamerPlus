@@ -80,6 +80,12 @@ body {
 	align-items: stretch;
 }
 
+#page-settings .setting-wrapper .my-button > .input-group-prepend > .input-group-text {
+	width: 10rem;
+	justify-content: center;
+	white-space: nowrap;
+}
+
 .my-button > .input-group-prepend > .bootstrap-switch {
 	flex-shrink: 0;
 	margin-left: -1px;

@@ -770,7 +770,7 @@ def renew_cookies(new_cookie, log=True):
         else:
             if log:
                 __color_print(0, '新cookie保存成功', no_sn=True, display=False)
-                break
+            break
 
 
 def bahamut_request(method, url, **kwargs):

@@ -25,6 +25,11 @@ from Anime import Anime, TryTooManyTimeError, NonRetryableDownloadError
 from ColorPrint import err_print
 from Danmu import Danmu
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+
 
 def port_is_available(port):
     # 檢查連接埠是否可用（未被佔用），可用則傳回 True
@@ -905,6 +910,11 @@ if __name__ == '__main__':
         check_new_version()  # 檢查新版
     version_msg = '當前aniGamerPlus版本: ' + settings['aniGamerPlus_version']
     print(version_msg)
+
+    if settings['use_mobile_api'] and curl_requests is not None:
+        err_print(0, '設定提醒',
+                  'use_mobile_api 的 App UA 與 curl_cffi 瀏覽器指紋不一致, 可能提高 WAF 風控風險, 建議關閉',
+                  status=1, no_sn=True)
 
     # 初始化 sqlite3 資料庫
     conn = sqlite3.connect(db_path)

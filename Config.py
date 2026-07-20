@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.7'
+aniGamerPlus_version = 'v24.9.8'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
@@ -261,7 +261,6 @@ def __update_settings(old_settings):  # 升級配置檔案
         new_settings['ua'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.96 Safari/537.36"
 
     if 'prevent_guest_download' not in new_settings.keys():
-        # v24.9.7 新增訪客模式不下載
         new_settings['prevent_guest_download'] = False
 
     if 'classify_bangumi' not in new_settings.keys():
@@ -753,6 +752,14 @@ def __parse_cookie_line(cookie_line):
     return cookies
 
 
+_CF_COOKIE_PREFIXES = ('__cf', 'cf_', '_cf')
+
+
+def strip_cf_cookies(cookies):
+    # Cloudflare 連線層 cookie 由 curl_cffi session jar 管理，不寫回 cookie.txt。
+    return {k: v for k, v in cookies.items() if not k.lower().startswith(_CF_COOKIE_PREFIXES)}
+
+
 def __cookie_dict_to_string(cookie_dict):
     return '; '.join([key + '=' + str(value) for key, value in cookie_dict.items()])
 
@@ -766,7 +773,7 @@ def __read_cookie_file_dict():
             if not line.isspace():
                 cookies = __parse_cookie_line(line)
                 cookies.pop('ckBH_lastBoard', 404)
-                return cookies
+                return strip_cf_cookies(cookies)
     return {}
 
 
@@ -797,7 +804,7 @@ def read_cookie(log=False):
                 if not line.isspace():  # 跳過空白行
                     cookies = __parse_cookie_line(line)
                     cookies.pop('ckBH_lastBoard', 404)
-                    cookie = cookies
+                    cookie = strip_cf_cookies(cookies)
                     if log:
                         __color_print(0, '讀取cookie', detail='已讀取cookie', no_sn=True, display=False)
                     return dict(cookie)  # cookie僅一行, 讀到後馬上return
@@ -841,7 +848,7 @@ def renew_cookies_if_current(new_cookie, previous_baharune=None, log=True):
     global cookie
     if not new_cookie:
         return
-    new_cookie = dict(new_cookie)
+    new_cookie = strip_cf_cookies(dict(new_cookie))
     new_cookie_str = __cookie_dict_to_string(new_cookie)
     with cookie_write_lock:
         cookie = None  # 重置cookie

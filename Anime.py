@@ -10,7 +10,8 @@ import Config
 from curl_cffi import requests as curl_requests
 from Danmu import Danmu
 from bs4 import BeautifulSoup
-import re, time, os, platform, subprocess, requests, random, sys
+import re, time, os, platform, requests, random, sys
+from gevent import subprocess
 from ColorPrint import err_print
 from ftplib import FTP, FTP_TLS
 import socket
@@ -319,9 +320,10 @@ class Anime:
         # 將 session cookie jar 攤平成 dict (同名 cookie 跨網域重複時取最後值)
         jar = self._session.cookies
         try:
-            return jar.get_dict()
+            cookies = jar.get_dict()
         except AttributeError:
-            return dict(jar)
+            cookies = dict(jar)
+        return Config.strip_cf_cookies({k: v for k, v in cookies.items() if v != 'deleted'})
 
     def __clear_session_cookies(self):
         try:

@@ -11,17 +11,17 @@ on:
       - master
 jobs:
   build:
-    runs-on: windows-2019
+    runs-on: windows-latest
     strategy:
       # You can use PyPy versions in python-version.
       # For example, pypy2 and pypy3
       matrix:
-        python: [3.8.x, 3.9.x]
+        python: [3.8.x, 3.9.x, 3.11.x]
     
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Set up Python ${{ matrix.python }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@v5
       with: 
           python-version: ${{ matrix.python }}
     - name: Install dependencies

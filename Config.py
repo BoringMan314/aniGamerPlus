@@ -895,7 +895,7 @@ def probe_bahamut_login(sn=None):
     if settings.get('use_proxy') and settings.get('proxy'):
         proxies = {'http': settings['proxy'], 'https': settings['proxy']}
 
-    session = requests.Session()
+    session = bahamut_curl_session()
     for key, value in login_cookies.items():
         session.cookies.set(key, value, domain='.gamer.com.tw')
 
@@ -903,7 +903,8 @@ def probe_bahamut_login(sn=None):
         device_resp = session.get(
             'https://ani.gamer.com.tw/ajax/getdeviceid.php',
             headers=headers, timeout=15, proxies=proxies)
-        device_resp.raise_for_status()
+        if device_resp.status_code >= 400:
+            device_resp.raise_for_status()
         device = device_resp.json().get('deviceid')
         if not device:
             return 'error', '無法取得 device id'
@@ -1036,13 +1037,20 @@ def renew_cookies(new_cookie, log=True):
             break
 
 
+def curl_cffi_impersonate():
+    settings = read_settings()
+    if 'firefox' in settings['ua'].lower():
+        return 'firefox135'
+    return 'chrome131'
+
+
+def bahamut_curl_session():
+    return curl_requests.Session(impersonate=curl_cffi_impersonate())
+
+
 def bahamut_request(method, url, **kwargs):
     # 以 curl_cffi Session 發送請求，impersonate 依 UA 選擇
     settings = read_settings()
-    if 'firefox' in settings['ua'].lower():
-        impersonate = 'firefox135'
-    else:
-        impersonate = 'chrome131'
     headers = dict(kwargs.pop('headers', None) or {})
     if not any(k.lower() == 'user-agent' for k in headers):
         headers['User-Agent'] = settings['ua']
@@ -1050,7 +1058,7 @@ def bahamut_request(method, url, **kwargs):
     if settings.get('use_proxy') and settings.get('proxy'):
         kwargs['proxies'] = {'https': settings['proxy'], 'http': settings['proxy']}
     kwargs.setdefault('timeout', 10)
-    session = curl_requests.Session(impersonate=impersonate)
+    session = bahamut_curl_session()
     try:
         return session.request(method, url, **kwargs)
     except curl_requests.RequestsError as e:

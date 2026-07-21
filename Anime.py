@@ -41,13 +41,8 @@ class Anime:
         self._temp_dir = self._settings['temp_dir']
         self._gost_port = str(gost_port)
 
-        if 'firefox' in self._settings['ua'].lower():
-            impersonate = 'firefox135'
-        else:
-            impersonate = 'chrome131'
-        # 頁面 Session（curl_cffi）；認證 AJAX Session（requests）
+        impersonate = Config.curl_cffi_impersonate()
         self._session = curl_requests.Session(impersonate=impersonate)
-        self._auth_session = requests.Session()
         self._session_warmed_up = False
         self._renewing_cookie = False
         self._title = ''
@@ -319,18 +314,18 @@ class Anime:
         else:
             self._req_header = self._web_header
 
-    def __session_cookies(self, auth=False):
+    def __session_cookies(self):
         # Session cookie jar 轉 dict，略過值為 deleted 的項
-        jar = self._auth_session.cookies if auth else self._session.cookies
+        jar = self._session.cookies
         try:
             cookies = jar.get_dict()
         except AttributeError:
             cookies = dict(jar)
         return {k: v for k, v in cookies.items() if v != 'deleted'}
 
-    def __clear_session_cookies(self, auth=False):
+    def __clear_session_cookies(self):
         try:
-            (self._auth_session if auth else self._session).cookies.clear()
+            self._session.cookies.clear()
         except AttributeError:
             pass
 
@@ -342,15 +337,14 @@ class Anime:
         return {k: v for k, v in cookies.items() if v and v != 'deleted'}
 
     def __prepare_auth_session(self):
-        # 將登入 cookie 寫入 auth Session（getdeviceid 會追加 ANIME_SIGN）
-        self.__clear_session_cookies(auth=True)
+        # 將登入 cookie 寫入 curl-cffi Session jar（getdeviceid 會追加 ANIME_SIGN）
+        self.__clear_session_cookies()
         for key, value in self.__login_cookies().items():
-            self._auth_session.cookies.set(key, value, domain='.gamer.com.tw')
+            self._session.cookies.set(key, value, domain='.gamer.com.tw')
 
     def __has_login_cookie(self):
         cookies = dict(self._cookies or {})
         cookies.update(self.__session_cookies())
-        cookies.update(self.__session_cookies(auth=True))
         return 'BAHAID' in cookies
 
     def __request(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx=False, auth=False):
@@ -364,13 +358,12 @@ class Anime:
 
         # 取得頁面
         error_cnt = 0
-        session = self._auth_session if auth else self._session
         request_cookies = None
         if auth:
-            # auth 請求使用 Session jar 內 cookie
+            # 登入 AJAX：沿用 jar（含 getdeviceid 下發的 ANIME_SIGN）
             request_cookies = None
         elif self._cookies and not no_cookies:
-            # 非 auth 請求：清空 jar 後以 dict 傳入登入 cookie
+            # 頁面請求：清空 jar 後以 dict 傳入登入 cookie，避免 jar 混送遊客 cookie
             self.__clear_session_cookies()
             request_cookies = self.__login_cookies()
         else:
@@ -378,8 +371,8 @@ class Anime:
         while True:
             try:
                 proxies = self._proxies if self._proxies else None
-                f = session.get(req, headers=current_header, cookies=request_cookies, timeout=10,
-                                proxies=proxies)
+                f = self._session.get(req, headers=current_header, cookies=request_cookies, timeout=10,
+                                      proxies=proxies)
             except (requests.exceptions.RequestException, curl_requests.RequestsError) as e:
                 if error_cnt >= max_retry >= 0:
                     raise TryTooManyTimeError('任務狀態: sn=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s' % req)
@@ -398,7 +391,7 @@ class Anime:
             return f
 
         # 依 Set-Cookie 更新 self._cookies，必要時寫入 cookie.txt
-        jar_cookies = self.__session_cookies(auth=auth)
+        jar_cookies = self.__session_cookies()
         if not self._cookies:
             self._cookies = jar_cookies
         elif 'nologinuser' not in self._cookies.keys() and 'BAHAID' not in self._cookies.keys():

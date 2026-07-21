@@ -8,55 +8,53 @@
 			</div>
 			<div class="modal-body setting-wrapper">
 				<form>
-					<div class="row setting-content setting-content">
-						<div class="input-group">
-							<div class="input-group-prepend">
-								<span class="input-group-text">影片連結</span>
-							</div>
-							<input id="manual_link" type="text" class="form-control input-group-prepend-form-control" />
+					<div class="input-group setting-content">
+						<div class="input-group-prepend">
+							<span class="input-group-text">影片連結</span>
 						</div>
+						<input id="manual_link" type="text" class="form-control input-group-prepend-form-control" />
 					</div>
 
-					<div class="row input-group setting-content">
-						<div class="input-group-prepend ">
-							<span class="input-group-text">下載模式　　　</span>
-							<select id="manual_mode" class="selectpicker show-tick form-control" data-style="btn-gray" data-header="選擇下載模式">
-								<option data-subtext="本集">single</option>
-								<option data-subtext="最後一集">latest</option>
-								<option data-subtext="全部劇集">all</option>
-								<option data-subtext="最近上傳">largest-sn</option>
-							</select>
+					<div class="input-group setting-content setting-control-row">
+						<div class="input-group-prepend">
+							<span class="input-group-text">下載模式</span>
 						</div>
+						<select id="manual_mode" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇下載模式">
+							<option data-subtext="本集">single</option>
+							<option data-subtext="最後一集">latest</option>
+							<option data-subtext="全部劇集">all</option>
+							<option data-subtext="最近上傳">largest-sn</option>
+						</select>
 					</div>
 
-					<div class="input-group row setting-content">
-						<div class="input-group-prepend ">
-							<span class="input-group-text">下載解析度　　</span>
-							<select id="manual_resolution" class="selectpicker show-tick form-control" data-style="btn-gray" data-header="選擇解析度">
-								<option>1080P</option>
-								<option>720P</option>
-								<option>540P</option>
-								<option>480P</option>
-								<option>360P</option>
-							</select>
+					<div class="input-group setting-content setting-control-row">
+						<div class="input-group-prepend">
+							<span class="input-group-text">下載解析度</span>
 						</div>
+						<select id="manual_resolution" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇解析度">
+							<option>1080P</option>
+							<option>720P</option>
+							<option>540P</option>
+							<option>480P</option>
+							<option>360P</option>
+						</select>
 					</div>
 
-					<div class="row input-group setting-content">
+					<div class="input-group setting-content setting-control-row">
 						<div class="input-group-prepend">
 							<span class="input-group-text">建立番劇資料夾</span>
 							<input id="manual_classify" type="checkbox" data-toggle="switch" data-on-color="success" data-size="normal" checked />
 						</div>
 					</div>
 
-					<div class="row input-group setting-content">
+					<div class="input-group setting-content setting-control-row">
 						<div class="input-group-prepend">
-							<span class="input-group-text">下載彈幕　　　</span>
+							<span class="input-group-text">下載彈幕</span>
 							<input id="manual_danmu" type="checkbox" data-toggle="switch" data-on-color="success" data-size="normal" />
 						</div>
 					</div>
 
-					<div class="row input-group setting-content" style="max-width: 15rem;">
+					<div class="input-group setting-content setting-control-row">
 						<div class="input-group-prepend">
 							<span class="input-group-text">最大並發下載數</span>
 						</div>

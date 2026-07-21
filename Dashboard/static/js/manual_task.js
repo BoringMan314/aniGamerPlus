@@ -7,6 +7,13 @@ function initManualTaskModal() {
 		manualTaskInited = true;
 	}
 
+	if (window.syncSettingControlWidths) {
+		window.syncSettingControlWidths();
+		setTimeout(function() {
+			window.syncSettingControlWidths();
+		}, 0);
+	}
+
 	$.getJSON('data/config.json', function(data) {
 		$('#manual_thread_limit').val(data['multi-thread']);
 	});

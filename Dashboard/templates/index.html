@@ -100,24 +100,24 @@
 					<div class="input-group col-md-4 my-button">
 						<div class="input-group-prepend">
 							<span class="input-group-text">下載解析度　　</span>
-							<select id="download_resolution" class="selectpicker show-tick form-control" data-style="btn-gray" data-header="選擇解析度">
-								<option>1080P</option>
-								<option>720P</option>
-								<option>540P</option>
-								<option>480P</option>
-								<option>360P</option>
-							</select>
 						</div>
+						<select id="download_resolution" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇解析度">
+							<option>1080P</option>
+							<option>720P</option>
+							<option>540P</option>
+							<option>480P</option>
+							<option>360P</option>
+						</select>
 					</div>
 					<div class="input-group col-md-4 my-button">
 						<div class="input-group-prepend">
 							<span class="input-group-text">預設下載模式　</span>
-							<select id="default_download_mode" class="selectpicker show-tick form-control" data-style="btn-gray" data-header="選擇下載模式">
-								<option data-subtext="最後一集">latest</option>
-								<option data-subtext="全部劇集">all</option>
-								<option data-subtext="最近上傳">largest-sn</option>
-							</select>
 						</div>
+						<select id="default_download_mode" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇下載模式">
+							<option data-subtext="最後一集">latest</option>
+							<option data-subtext="全部劇集">all</option>
+							<option data-subtext="最近上傳">largest-sn</option>
+						</select>
 					</div>
 					<div class="input-group col-md-4 my-button">
 						<div class="input-group-prepend">
@@ -208,13 +208,13 @@
 					<div class="input-group col-md-4 my-button">
 						<div class="input-group-prepend">
 							<span class="input-group-text">選擇協議　</span>
-							<select id="proxy_protocol" class="selectpicker show-tick form-control" data-style="btn-gray" data-header="選擇協議">
-								<option>SOCKS5</option>
-								<option>SOCKS5H</option>
-								<option>HTTP</option>
-								<option>HTTPS</option>
-							</select>
 						</div>
+						<select id="proxy_protocol" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇協議">
+							<option>SOCKS5</option>
+							<option>SOCKS5H</option>
+							<option>HTTP</option>
+							<option>HTTPS</option>
+						</select>
 					</div>
 					<div class="input-group col-md-4 my-button">
 						<div class="input-group-prepend">
@@ -300,6 +300,20 @@
 				size: 'normal',
 				onText: 'ON',
 				offText: 'OFF'
+			});
+			$('.selectpicker').selectpicker();
+			if (window.syncSettingControlWidths) {
+				window.syncSettingControlWidths();
+				setTimeout(function () {
+					if (window.syncSettingControlWidths) {
+						window.syncSettingControlWidths();
+					}
+				}, 0);
+			}
+			$(window).on('resize', function () {
+				if (window.syncSettingControlWidths) {
+					window.syncSettingControlWidths();
+				}
 			});
 		</script>
 	</body>

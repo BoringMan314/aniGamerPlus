@@ -68,7 +68,10 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
         msg = prefix
 
     if no_sn:
-        msg = msg + err_msg + ' ' + detail
+        if err_msg:
+            msg = msg + err_msg + (' ' + detail if detail else '')
+        else:
+            msg = msg + detail
     else:
         msg = msg + err_msg + ': sn=' + str(sn) + '\t' + detail
 

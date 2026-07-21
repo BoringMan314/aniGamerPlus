@@ -56,6 +56,25 @@ function readJson() {
 	});
 }
 
+function syncSettingControlWidths() {
+	var $sw = $('#page-settings .my-button.col-md-4 .bootstrap-switch').first();
+	if (!$sw.length) {
+		$sw = $('#manualTasks .setting-control-row .bootstrap-switch').first();
+	}
+	if (!$sw.length) {
+		return;
+	}
+	var w = Math.round($sw.outerWidth());
+	if (w > 0) {
+		document.documentElement.style.setProperty('--setting-control-width', w + 'px');
+		var $controls = $('#page-settings .my-button.col-md-4 > .bootstrap-select.form-control, #manualTasks .setting-control-row > .bootstrap-select.form-control');
+		$controls.each(function() {
+			$(this).css({ width: w, maxWidth: w, minWidth: w });
+		});
+	}
+}
+window.syncSettingControlWidths = syncSettingControlWidths;
+
 function renderJson() {
 	for (var id of id_list) {
 		if (id == 'proxy') continue; //代理設定已被分解
@@ -83,6 +102,7 @@ function renderJson() {
 
 		}
 	}
+	syncSettingControlWidths();
 }
 
 

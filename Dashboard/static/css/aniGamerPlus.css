@@ -81,9 +81,14 @@ body {
 }
 
 #page-settings .setting-wrapper .my-button > .input-group-prepend > .input-group-text {
+	flex: 0 0 10rem;
 	width: 10rem;
+	max-width: 10rem;
+	min-width: 10rem;
 	justify-content: center;
 	white-space: nowrap;
+	position: relative;
+	z-index: 1;
 }
 
 .my-button > .input-group-prepend > .bootstrap-switch {
@@ -93,7 +98,10 @@ body {
 
 .my-button .bootstrap-switch .bootstrap-switch-handle-on,
 .my-button .bootstrap-switch .bootstrap-switch-handle-off,
-.my-button .bootstrap-switch .bootstrap-switch-label {
+.my-button .bootstrap-switch .bootstrap-switch-label,
+.setting-control-row .bootstrap-switch .bootstrap-switch-handle-on,
+.setting-control-row .bootstrap-switch .bootstrap-switch-handle-off,
+.setting-control-row .bootstrap-switch .bootstrap-switch-label {
 	white-space: nowrap;
 	padding: 0.375rem 0.75rem;
 	font-size: 1rem;
@@ -103,8 +111,82 @@ body {
 }
 
 .my-button .bootstrap-switch .bootstrap-switch-handle-on::before,
-.my-button .bootstrap-switch .bootstrap-switch-handle-off::before {
+.my-button .bootstrap-switch .bootstrap-switch-handle-off::before,
+.setting-control-row .bootstrap-switch .bootstrap-switch-handle-on::before,
+.setting-control-row .bootstrap-switch .bootstrap-switch-handle-off::before {
 	content: none;
+}
+
+/* 下載設定 / 手動任務：下拉與輸入框寬度對齊 ON/OFF（開關寬度不改，--setting-control-width 由 JS 量測） */
+#page-settings .my-button.col-md-4.input-group,
+.setting-control-row.input-group {
+	flex-wrap: nowrap;
+	align-items: stretch;
+	width: auto;
+	max-width: 100%;
+}
+
+#page-settings .my-button.col-md-4 > .input-group-prepend,
+.setting-control-row > .input-group-prepend {
+	flex: 0 0 auto;
+	width: auto;
+	max-width: 100%;
+}
+
+#manualTasks .setting-control-row > .input-group-prepend > .input-group-text {
+	flex: 0 0 10rem;
+	width: 10rem;
+	max-width: 10rem;
+	min-width: 10rem;
+	justify-content: center;
+	white-space: nowrap;
+	position: relative;
+	z-index: 1;
+}
+
+#manualTasks .input-group.setting-content:not(.setting-control-row) > .input-group-prepend > .input-group-text {
+	flex: 0 0 10rem;
+	width: 10rem;
+	max-width: 10rem;
+	min-width: 10rem;
+	justify-content: center;
+	white-space: nowrap;
+}
+
+#page-settings .my-button.col-md-4 > .bootstrap-select.input-group-prepend-form-control,
+.setting-control-row > .bootstrap-select.input-group-prepend-form-control,
+#page-settings .my-button.col-md-4 > .bootstrap-select.form-control,
+.setting-control-row > .bootstrap-select.form-control {
+	flex: 0 0 var(--setting-control-width, 6.875rem);
+	width: var(--setting-control-width, 6.875rem) !important;
+	max-width: var(--setting-control-width, 6.875rem);
+	min-width: var(--setting-control-width, 6.875rem);
+}
+
+#page-settings .my-button.col-md-4 > .bootstrap-select.input-group-prepend-form-control > .dropdown-toggle,
+.setting-control-row > .bootstrap-select.input-group-prepend-form-control > .dropdown-toggle,
+#page-settings .my-button.col-md-4 > .bootstrap-select.form-control > .dropdown-toggle,
+.setting-control-row > .bootstrap-select.form-control > .dropdown-toggle {
+	width: 100% !important;
+	max-width: 100%;
+	box-sizing: border-box;
+	height: 100%;
+	min-height: calc(1.5em + 0.75rem + 2px);
+	padding: 0.375rem 0.75rem;
+	line-height: 1.5;
+}
+
+#page-settings .my-button.col-md-4 > .form-control.input-group-prepend-form-control:not(.bootstrap-select),
+.setting-control-row > .form-control.input-group-prepend-form-control:not(.bootstrap-select) {
+	flex: 0 0 var(--setting-control-width, 6.875rem);
+	width: var(--setting-control-width, 6.875rem) !important;
+	max-width: var(--setting-control-width, 6.875rem);
+	min-width: var(--setting-control-width, 6.875rem);
+}
+
+.setting-control-row > .input-group-prepend > .bootstrap-switch {
+	flex-shrink: 0;
+	margin-left: -1px;
 }
 
 .btn-gray {

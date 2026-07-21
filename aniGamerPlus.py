@@ -220,7 +220,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         queue.pop(sn)
         processing_queue.remove(sn)
         upload_limiter.release()  # 並發上傳限制器
-        sys.exit(0)
+        return
 
     anime_in_db = read_db(sn)
     # 如果使用者設定要上傳且已經下載好了但還沒有上傳成功, 那麼僅上傳
@@ -269,7 +269,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         thread_limiter.release()
         Config.set_task_failed(sn)
         err_print(sn, '任務失敗', '從任務佇列中移除, 等待下次更新重試.', status=1)
-        sys.exit(1)
+        return
 
     anime = anime['anime']
 
@@ -282,7 +282,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         thread_limiter.release()
         Config.set_task_failed(sn)
         err_print(sn, '任務失敗', str(e), status=1)
-        sys.exit(1)
+        return
     except BaseException as e:
         # 兜一下各種奇奇怪怪的錯誤
         err_print(sn, '下載異常', '發生未知錯誤: '+str(e), status=1)
@@ -297,7 +297,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         err_msg_detail = 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.'
         err_print(sn, '任務失敗', err_msg_detail, status=1)
         Config.set_task_failed(sn)
-        sys.exit(1)
+        return
 
     update_db(anime)  # 下載完成後, 更新資料庫
     download_cd = threading.Thread(target=download_cd_counter)
@@ -326,14 +326,15 @@ def worker(sn, sn_info, realtime_show_file_size=False):
     err_print(sn, '任務完成', status=2)
     
 
-def download_cd_counter():
+def download_cd_counter(release_limiter=True):
     seconds = settings['download_cd']
     while(seconds > 0):
         err_print('', '下載冷卻:', '下載冷卻時間剩餘 ' + str(seconds) + ' 秒', status=0, no_sn=True)
         wait_time = min(30, seconds)
         time.sleep(wait_time)
         seconds -= wait_time
-    thread_limiter.release()  # 並發下載限制器
+    if release_limiter:
+        thread_limiter.release()  # 並發下載限制器
 
 
 def check_tasks():
@@ -414,7 +415,7 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
     if anime['failed']:
         Config.set_task_failed(sn)
         thread_limiter.release()
-        sys.exit(1)
+        return
     anime = anime['anime']
 
     try:
@@ -460,8 +461,9 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
                 err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
                 anime.video_size = 0
 
-    download_cd = threading.Thread(target=download_cd_counter)
+    download_cd = threading.Thread(target=download_cd_counter, kwargs={'release_limiter': False})
     download_cd.start()
+    thread_limiter.release()
 
 
 def __get_info_only(sn):
@@ -469,7 +471,8 @@ def __get_info_only(sn):
 
     anime = build_anime(sn)
     if anime['failed']:
-        sys.exit(1)
+        thread_limiter.release()
+        return
     anime = anime['anime']
     anime.set_resolution(resolution)
     anime.get_info()
@@ -528,8 +531,9 @@ def reset_download_limiter_for_cli(limit):
 
 
 def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
-          cui_save_dir='', classify=True, get_info=False, user_cmd=False, realtime_show=True, cui_danmu=False):
-    # 不可在此重置 thread_limiter，否則後續手動/sn_list 任務會插隊
+          cui_save_dir='', classify=True, get_info=False, user_cmd=False, realtime_show=True, cui_danmu=False,
+          dashboard_worker=False):
+    # 保留 thread_limiter 狀態供後續任務排隊
     global danmu
     danmu = cui_danmu
 
@@ -566,7 +570,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
         anime = build_anime(sn)
         if anime['failed']:
-            sys.exit(1)
+            return
         anime = anime['anime']
 
         bangumi_list = list(anime.get_episode_list().values())
@@ -587,7 +591,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
         anime = build_anime(sn)
         if anime['failed']:
-            sys.exit(1)
+            return
         anime = anime['anime']
 
         bangumi_list = list(anime.get_episode_list().values())
@@ -616,7 +620,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
         anime = build_anime(sn)
         if anime['failed']:
-            sys.exit(1)
+            return
         anime = anime['anime']
 
         episode_dict = anime.get_episode_list()
@@ -648,7 +652,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
         anime = build_anime(sn)
         if anime['failed']:
-            sys.exit(1)
+            return
         anime = anime['anime']
 
         # 劇集列表 key value 互換, {'sn', '劇集名'}
@@ -700,7 +704,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
             for sn in ep_range:
                 anime = build_anime(sn)
                 if anime['failed']:
-                    sys.exit(1)
+                    return
                 anime = anime['anime']
                 anime.get_info()
         else:
@@ -738,6 +742,9 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     err_print(anime_db["sn"], '彈幕更新失敗', "資料庫不存在番劇名稱或影片路徑", status=1)
 
         print('所有任務已新增至佇列, 共 ' + str(tasks_counter) + ' 個任務, ' + '執行緒數: ' + str(cui_thread_limit) + '\n')
+
+    if dashboard_worker:
+        return
 
     __kill_thread_when_ctrl_c()
     kill_gost()  # 結束 gost
@@ -1053,12 +1060,13 @@ if __name__ == '__main__':
         if arg.danmu:
             danmu = True
 
-        Config.test_cookie()  # 測試cookie
+        Config.startup_cookie_check()
         __cui(arg.sn, resolution, download_mode, thread_limit, download_episodes, save_dir, classify,
               get_info=arg.information_only, user_cmd=user_command, cui_danmu=danmu)
 
     err_print(0, '自動模式啟動aniGamerPlus '+version_msg, no_sn=True, display=False)
     err_print(0, '工作目錄: ' + working_dir, no_sn=True, display=False)
+    Config.startup_cookie_check()
 
     if settings['use_proxy']:
         __init_proxy()
@@ -1069,7 +1077,7 @@ if __name__ == '__main__':
     while True:
         print()
         err_print(0, '開始更新', no_sn=True)
-        Config.test_cookie()  # 測試cookie
+        Config.read_cookie(log=False)
         if settings['read_sn_list_when_checking_update']:
             sn_dict = Config.read_sn_list()
         if settings['read_config_when_checking_update']:
@@ -1088,7 +1096,7 @@ if __name__ == '__main__':
                     err_print(task_sn, '加入任務佇列')
         info = '本次更新新增了 '+str(new_tasks_counter)+' 個新任務, 目前佇列中共有 ' + str(len(processing_queue)) + ' 個任務'
         err_print(0, '更新資訊', info, no_sn=True)
-        err_print(0, '更新終了', no_sn=True)
+        err_print(0, '更新結束', no_sn=True)
         print()
         for i in range(settings['check_frequency'] * 60):
             time.sleep(1)  # cool down, 這麼寫是為了可以 Ctrl+C 馬上退出

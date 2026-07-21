@@ -17,15 +17,11 @@ function postSnList() {
 		contentType: 'text/plain; charset=utf-8',
 		data: sn_list,
 		success: function(data) {
-			$('#uploadOk').show();
-			$('#uploadFailed').hide();
-			$('#uploadStatus').modal();
+			showUploadSuccess();
 			showSnList();
 		},
 		error: function(status) {
-			$('#uploadOk').hide();
-			$('#uploadFailed').show();
-			$('#uploadStatus').modal();
+			showUploadFailure();
 		}
 	});
 }

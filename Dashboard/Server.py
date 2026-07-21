@@ -7,7 +7,7 @@
 
 # 非阻塞
 from gevent import monkey; monkey.patch_all()
-from gevent import spawn
+from gevent.threadpool import ThreadPool
 
 import json, sys, os, re, time
 import threading, traceback
@@ -87,6 +87,9 @@ with open(id_list_path, 'r', encoding='utf-8') as f:
     id_list = re.sub(r'(var id_list\s*=\s*|\s*\n?)', '', f.read()).replace('\'', '"')
     id_list = json.loads(id_list)
 
+# 手動任務 ThreadPool（與 gevent WSGI 分離）
+_manual_task_pool = ThreadPool(4)
+
 
 @app.route('/')
 def home():
@@ -96,6 +99,11 @@ def home():
 @app.route('/monitor')
 def monitor():
     return render_template('index.html', active_page='monitor')
+
+
+@app.route('/data/login_status', methods=['GET'])
+def login_status_api():
+    return jsonify(Config.get_login_status(for_dashboard=True))
 
 
 @app.route('/data/config.json', methods=['GET'])
@@ -149,12 +157,12 @@ def manual_task():
         thread_limit = thread
 
     def run_cui():
-        cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False, cui_danmu=data['danmu'])
+        cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False,
+            cui_danmu=data['danmu'], dashboard_worker=True)
 
-    server = threading.Thread(target=run_cui)
+    _manual_task_pool.spawn(run_cui)
     err_print(0, 'Dashboard', '透過 Web 控制面板下達了手動任務', no_sn=True, status=2)
-    server.start()  # 啟動手動任務執行緒
-    return '{"status":"200"}'
+    return jsonify({'status': '200'})
 
 
 @app.route('/data/sn_list', methods=['GET'])
@@ -185,14 +193,19 @@ def tasks_progress(ws):
     # 推送任務進度資料
     # https://blog.csdn.net/sinat_32651363/article/details/87912701
     while not ws.closed:
-        msg = json.dumps(Config.get_tasks_progress_rate())
         try:
+            payload = {
+                'tasks': Config.get_tasks_progress_rate(),
+                'login': Config.get_login_status(for_dashboard=True),
+            }
+            msg = json.dumps(payload)
             ws.send(msg)
-            time.sleep(1)
         except WebSocketError:
-            # 連線中斷
             ws.close()
             break
+        except BaseException:
+            logger.exception('tasks_progress WebSocket 推送失敗')
+        time.sleep(1)
 
 
 @app.route('/sn_list', methods=['POST'])

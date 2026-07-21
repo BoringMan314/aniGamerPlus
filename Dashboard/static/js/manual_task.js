@@ -37,15 +37,27 @@ function readManualConfig() {
 		contentType: 'application/json; charset=utf-8',
 		data: JSON.stringify(manualData),
 		success: function(data) {
+			$('#manual_link').val('').focus();
+			resetUploadStatusModal();
+			$('#uploadOk .upload-status').text('任務已成功提交');
 			$('#uploadOk').show();
-			$('#uploadFailed').hide();
-			$('#uploadStatus').modal();
-			$('#manualTasks').modal('hide');
+			$('#uploadStatus').off('hidden.bs.modal.uploadStatusChain');
+			$('#uploadStatus').one('hidden.bs.modal.uploadStatusChain', function() {
+				$('#uploadOk .upload-status').text('配置已成功提交');
+				$('#manualTasks').modal('show');
+			});
+			$('#uploadStatus').modal('show');
 		},
 		error: function(status) {
-			$('#uploadOk').hide();
+			resetUploadStatusModal();
+			$('#uploadFailed .upload-status').text('任務提交失敗');
 			$('#uploadFailed').show();
-			$('#uploadStatus').modal();
+			$('#uploadStatus').off('hidden.bs.modal.uploadStatusChain');
+			$('#uploadStatus').one('hidden.bs.modal.uploadStatusChain', function() {
+				$('#uploadFailed .upload-status').text('配置提交失敗');
+				$('#manualTasks').modal('show');
+			});
+			$('#uploadStatus').modal('show');
 		}
 	});
 }

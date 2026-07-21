@@ -140,17 +140,11 @@ function readSettings() {
 		contentType: 'application/json; charset=utf-8',
 		data: JSON.stringify(dataArrays),
 		success: function(data) {
-			// 向使用者提示提交成功
-			$('#uploadOk').show();
-			$('#uploadFailed').hide();
-			$('#uploadStatus').modal();
+			showUploadSuccess();
 			reloadSetting();
 		},
 		error:function(status){
-			// 向使用者提示提交失敗
-			$('#uploadOk').hide();
-			$('#uploadFailed').show();
-			$('#uploadStatus').modal();
+			showUploadFailure();
 		}
 	})
 }

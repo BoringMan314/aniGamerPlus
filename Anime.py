@@ -11,7 +11,8 @@ from curl_cffi import requests as curl_requests
 from Danmu import Danmu
 from bs4 import BeautifulSoup
 import re, time, os, platform, requests, random, sys
-from gevent import subprocess
+import subprocess
+from gevent import subprocess as gevent_subprocess
 from ColorPrint import err_print
 from ftplib import FTP, FTP_TLS
 import socket
@@ -41,12 +42,14 @@ class Anime:
         self._gost_port = str(gost_port)
 
         if 'firefox' in self._settings['ua'].lower():
-            impersonate = 'firefox'
+            impersonate = 'firefox135'
         else:
-            impersonate = 'chrome124'
+            impersonate = 'chrome131'
+        # 頁面 Session（curl_cffi）；認證 AJAX Session（requests）
         self._session = curl_requests.Session(impersonate=impersonate)
+        self._auth_session = requests.Session()
         self._session_warmed_up = False
-        self._renewing_cookie = False  # cookie 刷新確認請求進行中 (遞迴防護)
+        self._renewing_cookie = False
         self._title = ''
         self._sn = sn
         self._bangumi_name = ''
@@ -200,7 +203,7 @@ class Anime:
             except KeyError:
                 err_print(self._sn, 'ERROR: 該 sn 下真的有動畫？', status=1)
                 self._episode_list = {}
-                sys.exit(1)
+                raise RuntimeError('該 sn 下沒有動畫')
         else:
             soup = self._src
             try:
@@ -209,7 +212,7 @@ class Anime:
                 # 該sn下沒有動畫
                 err_print(self._sn, 'ERROR: 該 sn 下真的有動畫？', status=1)
                 self._episode_list = {}
-                sys.exit(1)
+                raise RuntimeError('該 sn 下沒有動畫')
 
     def __get_bangumi_name(self):
         self._bangumi_name = self._title.replace('[' + self.get_episode() + ']', '').strip()  # 提取番劇名（去掉集數字尾）
@@ -316,29 +319,43 @@ class Anime:
         else:
             self._req_header = self._web_header
 
-    def __session_cookie_dict(self):
-        # 將 session cookie jar 攤平成 dict (同名 cookie 跨網域重複時取最後值)
-        jar = self._session.cookies
+    def __session_cookies(self, auth=False):
+        # Session cookie jar 轉 dict，略過值為 deleted 的項
+        jar = self._auth_session.cookies if auth else self._session.cookies
         try:
             cookies = jar.get_dict()
         except AttributeError:
             cookies = dict(jar)
-        return Config.strip_cf_cookies({k: v for k, v in cookies.items() if v != 'deleted'})
+        return {k: v for k, v in cookies.items() if v != 'deleted'}
 
-    def __clear_session_cookies(self):
+    def __clear_session_cookies(self, auth=False):
         try:
-            self._session.cookies.clear()
+            (self._auth_session if auth else self._session).cookies.clear()
         except AttributeError:
             pass
 
+    def __login_cookies(self):
+        # 有 BAHAID 或 BAHARUNE 時移除 nologinuser
+        cookies = dict(self._cookies or {})
+        if cookies.get('BAHAID') or cookies.get('BAHARUNE'):
+            cookies.pop('nologinuser', None)
+        return {k: v for k, v in cookies.items() if v and v != 'deleted'}
+
+    def __prepare_auth_session(self):
+        # 將登入 cookie 寫入 auth Session（getdeviceid 會追加 ANIME_SIGN）
+        self.__clear_session_cookies(auth=True)
+        for key, value in self.__login_cookies().items():
+            self._auth_session.cookies.set(key, value, domain='.gamer.com.tw')
+
     def __has_login_cookie(self):
         cookies = dict(self._cookies or {})
-        cookies.update(self.__session_cookie_dict())
+        cookies.update(self.__session_cookies())
+        cookies.update(self.__session_cookies(auth=True))
         return 'BAHAID' in cookies
 
-    def __request(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx = False):
+    def __request(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx=False, auth=False):
         # 設定 header
-        current_header = self._req_header
+        current_header = dict(self._req_header)
         if addition_header is None:
             addition_header = {}
         if len(addition_header) > 0:
@@ -347,15 +364,22 @@ class Anime:
 
         # 取得頁面
         error_cnt = 0
-        if self._cookies and not no_cookies:
-            cookies = self._cookies
+        session = self._auth_session if auth else self._session
+        request_cookies = None
+        if auth:
+            # auth 請求使用 Session jar 內 cookie
+            request_cookies = None
+        elif self._cookies and not no_cookies:
+            # 非 auth 請求：清空 jar 後以 dict 傳入登入 cookie
+            self.__clear_session_cookies()
+            request_cookies = self.__login_cookies()
         else:
-            cookies = {}
+            request_cookies = {}
         while True:
             try:
                 proxies = self._proxies if self._proxies else None
-                f = self._session.get(req, headers=current_header, cookies=cookies, timeout=10,
-                                      proxies=proxies)
+                f = session.get(req, headers=current_header, cookies=request_cookies, timeout=10,
+                                proxies=proxies)
             except (requests.exceptions.RequestException, curl_requests.RequestsError) as e:
                 if error_cnt >= max_retry >= 0:
                     raise TryTooManyTimeError('任務狀態: sn=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s' % req)
@@ -366,100 +390,122 @@ class Anime:
                 error_cnt += 1
             else:
                 break
+
+        # no_cookies 請求不更新 self._cookies
         if no_cookies:
-            # warm-up 與匿名解析請求會拿到遊客/Cloudflare cookie，不應混進登入 cookie 寫回流程。
-            self.__clear_session_cookies()
+            if not auth:
+                self.__clear_session_cookies()
             return f
 
-        # 處理 cookie
+        # 依 Set-Cookie 更新 self._cookies，必要時寫入 cookie.txt
+        jar_cookies = self.__session_cookies(auth=auth)
         if not self._cookies:
-            # 當例項中尚無 cookie, 則讀取
-            self._cookies = self.__session_cookie_dict()
+            self._cookies = jar_cookies
         elif 'nologinuser' not in self._cookies.keys() and 'BAHAID' not in self._cookies.keys():
-            # 處理遊客cookie
-            if 'nologinuser' in self.__session_cookie_dict().keys():
-                self._cookies = self.__session_cookie_dict()
-        elif not self._renewing_cookie:  # 刷新確認請求本身不重入此流程
+            if 'nologinuser' in jar_cookies.keys():
+                self._cookies = jar_cookies
+        elif self._renewing_cookie:
+            # _renewing_cookie 為 True 時跳過 Set-Cookie 處理
+            pass
+        else:
             set_cookie_str = f.headers.get('set-cookie') if 'set-cookie' in f.headers.keys() else ''
-            # Cloudflare 幾乎每個回應都會 set-cookie 刷新 __cf_bm, 只有帶 BAHARUNE 才是登入 cookie 輪替
-            if 'BAHARUNE' in set_cookie_str:
-                if re.search(r'(?i)(^|[;,]\s*)BAHARUNE=deleted\b', set_cookie_str):
-                    old_baharune = self._cookies.get('BAHARUNE')
-                    self._cookies.update(self.__session_cookie_dict())
-                    # set-cookie 更新 cookie 只有一次機會，若由其他執行緒搶先接收，則此處會傳回 deleted
-                    # 等待其他執行緒重新整理了cookie, 重新讀入cookie
+            # Set-Cookie 含 BAHARUNE 時才處理登入輪替
+            if 'BAHARUNE' not in set_cookie_str:
+                return f
 
-                    if self._settings['use_mobile_api'] and 'X-Bahamut-App-Android' in self._req_header:
-                        # 使用移動API將無法進行 cookie 重新整理, 改回 header 重新整理 cookie
-                        err_print(self._sn, '嘗試切換回 Web Header 重新整理 Cookie', display=False)
-                        self._req_header = self._web_header
-                        self._renewing_cookie = True
-                        try:
-                            self.__request('https://ani.gamer.com.tw/')  # 再次嘗試取得新 cookie
-                            self._cookies.update(self.__session_cookie_dict())
-                            Config.renew_cookies_if_current(self._cookies, previous_baharune=old_baharune, log=False)
-                        finally:
-                            self._renewing_cookie = False
-                    else:
-                        err_print(self._sn, '收到cookie重置響應', display=False)
-                        time.sleep(2)
-                        try_counter = 0
-                        succeed_flag = False
-                        while try_counter < 3:  # 嘗試讀三次, 不行就算了
-                            self._cookies = Config.read_cookie() or {}
-                            err_print(self._sn, '讀取cookie',
-                                      'cookie.txt最後修改時間: ' + Config.get_cookie_time() + ' 第' + str(try_counter) + '次嘗試',
-                                      display=False)
-                            new_baharune = self._cookies.get('BAHARUNE')
-                            if new_baharune and old_baharune != new_baharune:
-                                # 新cookie讀取成功 (因為有可能其他執行緒接到了新cookie)
-                                succeed_flag = True
-                                err_print(self._sn, '讀取cookie', '新cookie讀取成功', display=False)
-                                break
-                            else:
-                                err_print(self._sn, '讀取cookie', '新cookie讀取失敗', display=False)
-                                random_wait_time = random.uniform(2, 5)
-                                time.sleep(random_wait_time)
-                                try_counter = try_counter + 1
-                        if not succeed_flag:
-                            self._cookies = {}
-                            err_print(0, '使用者cookie更新失敗! 使用遊客身份訪問', status=1, no_sn=True)
+            if re.search(r'(?i)(^|[;,]\s*)BAHARUNE=deleted\b', set_cookie_str):
+                # 回應 BAHARUNE=deleted
+                old_baharune = self._cookies.get('BAHARUNE')
+                fallback_cookies = dict(self._cookies or {})
+                err_print(self._sn, '收到cookie重置響應', display=False)
 
-                        if self._settings['use_mobile_api'] and 'X-Bahamut-App-Android' not in self._req_header:
-                            # 即使切換 header cookie 也無法重新整理, 那麼恢復 header, 好歹廣告只有 3s
-                            self._req_header = self._mobile_header
-
-                else:
-                    # 僅在 BAHARUNE 實際變更時才寫入檔案並提示，避免 ANIME_SIGN 等觸發刷屏
-                    old_baharune = self._cookies.get('BAHARUNE')
-                    self._cookies.update(self.__session_cookie_dict())
+                # 以 Web Header 請求首頁嘗試取得新 BAHARUNE
+                previous_header = self._req_header
+                self._req_header = self._web_header
+                self._renewing_cookie = True
+                try:
+                    self.__clear_session_cookies()
+                    self._cookies = fallback_cookies
+                    self.__request('https://ani.gamer.com.tw/', show_fail=False, max_retry=1)
+                    self._cookies.update(self.__session_cookies())
                     new_baharune = self._cookies.get('BAHARUNE')
+                    if new_baharune and new_baharune != old_baharune:
+                        Config.renew_cookies(self._cookies, log=False)
+                        err_print(0, '登入cookie已更新', detail='網站回應輪替，已寫回 cookie.txt', status=2, no_sn=True)
+                        succeed_flag = True
+                    else:
+                        succeed_flag = False
+                except BaseException:
+                    succeed_flag = False
+                    self._cookies = fallback_cookies
+                finally:
+                    self._renewing_cookie = False
+                    if self._settings['use_mobile_api']:
+                        self._req_header = self._mobile_header
+                    else:
+                        self._req_header = previous_header
 
-                    if old_baharune != new_baharune and new_baharune is not None:
-                        Config.renew_cookies_if_current(self._cookies, previous_baharune=old_baharune, log=False)
-                        err_print(0, '使用者cookie已更新', status=2, no_sn=True)
-                        # 防遞迴: 確認請求僅允許一層, 其回應 cookie 在此收割而非重入刷新流程
-                        self._renewing_cookie = True
-                        try:
-                            self.__request('https://ani.gamer.com.tw/')
-                            self._cookies.update(self.__session_cookie_dict())
-                            Config.renew_cookies_if_current(self._cookies, previous_baharune=new_baharune, log=False)
-                        finally:
-                            self._renewing_cookie = False
-                        if self._settings['use_mobile_api']:
-                            self._req_header = self._mobile_header
-                            err_print(self._sn, '切換回 App Header 進行影片解析', display=False)
+                if not succeed_flag:
+                    time.sleep(2)
+                    try_counter = 0
+                    while try_counter < 3:
+                        file_cookies = Config.read_cookie() or {}
+                        err_print(self._sn, '讀取cookie',
+                                  'cookie.txt最後修改時間: ' + Config.get_cookie_time() + ' 第' + str(try_counter) + '次嘗試',
+                                  display=False)
+                        new_baharune = file_cookies.get('BAHARUNE')
+                        if new_baharune and old_baharune != new_baharune:
+                            self._cookies = file_cookies
+                            succeed_flag = True
+                            err_print(self._sn, '讀取cookie', '新cookie讀取成功', display=False)
+                            break
+                        err_print(self._sn, '讀取cookie', '新cookie讀取失敗', display=False)
+                        time.sleep(random.uniform(2, 5))
+                        try_counter += 1
+
+                if not succeed_flag:
+                    # 輪替失敗時自 cookie.txt 或記憶體還原 BAHARUNE
+                    file_cookies = Config.read_cookie() or {}
+                    if file_cookies.get('BAHARUNE') or file_cookies.get('BAHAID'):
+                        self._cookies = file_cookies
+                        err_print(0, '登入cookie刷新未完成，改用 cookie.txt 既有登入狀態', status=1, no_sn=True)
+                    elif fallback_cookies.get('BAHARUNE') or fallback_cookies.get('BAHAID'):
+                        self._cookies = fallback_cookies
+                        err_print(0, '登入cookie刷新未完成，沿用記憶體登入狀態', status=1, no_sn=True)
+                    else:
+                        self._cookies = {}
+                        err_print(0, '登入cookie更新失敗，改以遊客身份訪問', status=1, no_sn=True)
+                        Config.invalid_cookie()  # 清除 Config 記憶體 cookie 快取
+
+            else:
+                old_baharune = self._cookies.get('BAHARUNE')
+                self._cookies.update(jar_cookies)
+                if self._cookies.get('BAHAID') or self._cookies.get('BAHARUNE'):
+                    self._cookies.pop('nologinuser', None)
+                new_baharune = self._cookies.get('BAHARUNE')
+                # BAHARUNE 變更時寫入 cookie.txt
+                if old_baharune != new_baharune and new_baharune is not None:
+                    Config.renew_cookies(self._cookies, log=False)
+                    err_print(0, '登入cookie已更新', detail='網站回應輪替，已寫回 cookie.txt', status=2, no_sn=True)
+                    if self._settings['use_mobile_api']:
+                        self._req_header = self._mobile_header
+                        err_print(self._sn, '切換回 App Header 進行影片解析', display=False)
 
         return f
 
-    def __request_json(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx = False):
-        return self.__request(req, no_cookies, show_fail, max_retry, addition_header, use_pyhttpx).json()
+    def __request_json(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx=False, auth=False):
+        return self.__request(req, no_cookies, show_fail, max_retry, addition_header, use_pyhttpx, auth=auth).json()
 
     def __get_m3u8_dict(self):
         # m3u8 取得模組參考自 https://github.com/c0re100/BahamutAnimeDownloader
+        # 自 cookie.txt 重載 self._cookies
+        file_cookies = Config.read_cookie()
+        self._cookies = file_cookies if file_cookies is not None else {}
+        self.__prepare_auth_session()
+
         def get_device_id():
             req = 'https://ani.gamer.com.tw/ajax/getdeviceid.php'
-            self._device_id = self.__request_json(req)['deviceid']
+            self._device_id = self.__request_json(req, auth=True)['deviceid']
             return self._device_id
 
         def get_playlist():
@@ -467,7 +513,7 @@ class Anime:
                 req = f'https://api.gamer.com.tw/mobile_app/anime/v3/m3u8.php?videoSn={str(self._sn)}&device={self._device_id}'
             else:
                 req = 'https://ani.gamer.com.tw/ajax/m3u8.php?sn=' + str(self._sn) + '&device=' + self._device_id
-            self._playlist = self.__request_json(req)
+            self._playlist = self.__request_json(req, auth=True)
 
         def random_string(num):
             chars = 'abcdefghijklmnopqrstuvwxyz0123456789'
@@ -484,33 +530,33 @@ class Anime:
                 req = 'https://ani.gamer.com.tw/ajax/token.php?adID=0&sn=' + str(
                     self._sn) + "&device=" + self._device_id + "&hash=" + random_string(12)
             # 傳回基礎資訊，用於判斷是否為 VIP
-            return self.__request_json(req)
+            return self.__request_json(req, auth=True)
 
         def unlock():
             req = 'https://ani.gamer.com.tw/ajax/unlock.php?sn=' + str(self._sn) + "&ttl=0"
-            f = self.__request(req)  # 無響應正文
+            f = self.__request(req, auth=True)  # 無響應正文
 
         def check_lock():
             req = 'https://ani.gamer.com.tw/ajax/checklock.php?device=' + self._device_id + '&sn=' + str(self._sn)
-            f = self.__request(req)
+            f = self.__request(req, auth=True)
 
         def start_ad():
             if self._settings['use_mobile_api']:
                 req = f"https://api.gamer.com.tw/mobile_app/anime/v1/stat_ad.php?schedule=-1&sn={str(self._sn)}"
             else:
                 req = "https://ani.gamer.com.tw/ajax/videoCastcishu.php?sn=" + str(self._sn) + "&s=194699"
-            f = self.__request(req)  # 無響應正文
+            f = self.__request(req, auth=True)  # 無響應正文
 
         def skip_ad():
             if self._settings['use_mobile_api']:
                 req = f"https://api.gamer.com.tw/mobile_app/anime/v1/stat_ad.php?schedule=-1&ad=end&sn={str(self._sn)}"
             else:
                 req = "https://ani.gamer.com.tw/ajax/videoCastcishu.php?sn=" + str(self._sn) + "&s=194699&ad=end"
-            f = self.__request(req)  # 無響應正文
+            f = self.__request(req, auth=True)  # 無響應正文
 
         def video_start():
             req = "https://ani.gamer.com.tw/ajax/videoStart.php?sn=" + str(self._sn)
-            f = self.__request(req)
+            f = self.__request(req, auth=True)
 
         def check_no_ad(error_count=10):
             if error_count == 0:
@@ -518,7 +564,7 @@ class Anime:
 
             req = "https://ani.gamer.com.tw/ajax/token.php?sn=" + str(
                 self._sn) + "&device=" + self._device_id + "&hash=" + random_string(12)
-            resp = self.__request_json(req)
+            resp = self.__request_json(req, auth=True)
             if 'time' in resp.keys():
                 if not resp['time'] == 1:
                     err_print(self._sn, '廣告似乎還沒去除, 追加等待2秒, 剩餘重試次數 ' + str(error_count), status=1)
@@ -747,12 +793,12 @@ class Anime:
                 failed_flag = True
                 err_print(self._sn, '下載狀態', 'Bad segment=' + chunk_name, status=1)
                 limiter.release()
-                sys.exit(1)
+                return
             except BaseException as e:
                 failed_flag = True
                 err_print(self._sn, '下載狀態', 'Bad segment=' + chunk_name + ' 發生未知錯誤: ' + str(e), status=1)
                 limiter.release()
-                sys.exit(1)
+                return
 
             # 顯示完成百分比
             nonlocal finished_chunk_counter
@@ -980,7 +1026,7 @@ class Anime:
             self.video_size = 0
             return
 
-        check_ffmpeg = subprocess.Popen('ffmpeg -h', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        check_ffmpeg = gevent_subprocess.Popen('ffmpeg -h', shell=True, stdout=gevent_subprocess.PIPE, stderr=gevent_subprocess.PIPE)
         if check_ffmpeg.stdout.readlines():  # 查詢 ffmpeg 是否已放入系統 path
             self._ffmpeg_path = 'ffmpeg'
         else:

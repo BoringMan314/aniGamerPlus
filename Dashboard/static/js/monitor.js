@@ -7,6 +7,8 @@
 	var lastDataKey = '';
 	var lastSortKey = '';
 	var renderTasks = null;
+	var socketSilent = false;
+	var socketConnecting = false;
 
 	function statusOrder(status) {
 		if (status.indexOf('正在') !== -1 || status.indexOf('失敗! 重啟') !== -1) {
@@ -68,18 +70,36 @@
 		}
 	}
 
+	function extractTasksAndLogin(payload) {
+		if (!payload) {
+			return { tasks: null, login: null };
+		}
+		if (payload.tasks !== undefined) {
+			return { tasks: payload.tasks, login: payload.login || null };
+		}
+		return { tasks: payload, login: null };
+	}
+
 	function scheduleReconnect() {
 		if (reconnectTimer) {
 			return;
 		}
-		showMonitorLoading();
+		if (!socketSilent) {
+			showMonitorLoading();
+		}
 		reconnectTimer = setTimeout(function () {
 			reconnectTimer = null;
-			connectTaskProgress();
+			connectTaskProgress({ silent: socketSilent });
 		}, 2000);
 	}
 
-	function connectTaskProgress() {
+	function connectTaskProgress(options) {
+		options = options || {};
+		socketSilent = !!options.silent;
+		if (socketConnecting || (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN))) {
+			return;
+		}
+		socketConnecting = true;
 		if (ws) {
 			intentionalClose = true;
 			try {
@@ -99,28 +119,40 @@
 			.done(function (token) {
 				tasksProgressUrl += token;
 				ws = new WebSocket(tasksProgressUrl);
+				socketConnecting = false;
 
 				ws.onopen = function () {
-					hideMonitorLoading();
+					if (!socketSilent) {
+						hideMonitorLoading();
+					}
 				};
 
 				ws.onmessage = function (evt) {
-					var data = parseProgressPayload(evt.data);
-					if (!data) {
+					var payload = parseProgressPayload(evt.data);
+					if (!payload) {
 						scheduleReconnect();
 						return;
 					}
-					lastPayload = data;
+					var parts = extractTasksAndLogin(payload);
+					if (parts.login && window.applyLoginStatusBadge) {
+						window.applyLoginStatusBadge(parts.login);
+					}
+					if (!parts.tasks) {
+						return;
+					}
+					lastPayload = parts.tasks;
 					if ($('#page-monitor').is(':visible') && renderTasks) {
 						renderTasks(lastPayload);
 					}
 				};
 
 				ws.onerror = function () {
+					socketConnecting = false;
 					scheduleReconnect();
 				};
 
 				ws.onclose = function () {
+					socketConnecting = false;
 					if (intentionalClose) {
 						intentionalClose = false;
 						return;
@@ -129,9 +161,14 @@
 				};
 			})
 			.fail(function () {
+				socketConnecting = false;
 				scheduleReconnect();
 			});
 	}
+
+	window.ensureTaskProgressSocket = function () {
+		connectTaskProgress({ silent: true });
+	};
 
 	window.refreshTaskMonitor = function () {
 		if (lastPayload && $('#page-monitor').is(':visible') && renderTasks) {
@@ -222,7 +259,7 @@
 				}
 			};
 
-			connectTaskProgress();
+			connectTaskProgress({ silent: false });
 		});
 	};
 })();

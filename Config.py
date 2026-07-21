@@ -23,10 +23,19 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.8'
+aniGamerPlus_version = 'v24.9.9'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
+cookie_loaded = False
+cookie_mtime_at_load = None
+_cookie_reload_suppress_notice = False
+_cookie_load_lock = threading.RLock()
+_login_status_reporting = False
+login_status_cache = {'state': 'unknown', 'label': '', 'detail': ''}
+login_status_probe_mtime = None
+LOGIN_PROBE_SN = 878
+GUEST_COOKIE_DETAIL = 'cookie.txt 為空（請貼上瀏覽器 cookie）'
 max_multi_thread = 5
 max_multi_downloading_segment = 5
 tasks_progress_rate = {}  # 儲存任務進度, 供面板使用,
@@ -74,6 +83,10 @@ def __color_print(sn, err_msg, detail='', status=0, no_sn=False, display=True):
     except UnboundLocalError:
         from ColorPrint import err_print
         err_print(sn, err_msg, detail=detail, status=status, no_sn=no_sn, display=display)
+
+
+def __cookie_read_log(detail, status=0, display=True):
+    __color_print(0, '', detail='讀取cookie：' + detail, status=status, no_sn=True, display=display)
 
 
 def get_max_multi_thread():
@@ -672,18 +685,17 @@ def check_encoding(file_path):
     # 識別檔案編碼, 將非 UTF-8 編碼轉為 UTF-8
     with open(file_path, 'rb') as f:
         data = f.read()
-        file_encoding = chardet.detect(data)['encoding']  # 識別檔案編碼
-        if file_encoding == 'utf-8' or file_encoding == 'ascii':
-            # 如果為 UTF-8 編碼, 無需操作
+        file_encoding = chardet.detect(data)['encoding']
+        if not file_encoding or file_encoding.lower() in ('utf-8', 'ascii'):
             return
-        else:
-            # 如果為其他編碼, 則轉為 UTF-8 編碼, 包含處理 BOM 頭
-            with open(file_path, 'wb') as f2:
-                __color_print(0, '檔案讀取', file_path + ' 編碼為 ' + file_encoding + ' 將轉碼為 UTF-8', no_sn=True, status=1)
-                data = data.decode(file_encoding)  # 解碼
-                data = data.encode('utf-8')  # 編碼
-                f2.write(data)  # 寫入檔案
-                __color_print(0, '檔案讀取', file_path + ' 轉碼成功', no_sn=True, status=2)
+        try:
+            text = data.decode(file_encoding)
+        except (LookupError, UnicodeDecodeError):
+            text = data.decode('utf-8', errors='replace')
+        with open(file_path, 'wb') as f2:
+            __color_print(0, '檔案讀取', file_path + ' 編碼為 ' + str(file_encoding) + ' 將轉碼為 UTF-8', no_sn=True, status=1)
+            f2.write(text.encode('utf-8'))
+            __color_print(0, '檔案讀取', file_path + ' 轉碼成功', no_sn=True, status=2)
 
 
 def read_sn_list():
@@ -736,92 +748,246 @@ def read_sn_list():
         return sn_dict
 
 
-def test_cookie():
-    # 測試cookie.txt是否存在, 是否能正常讀取, 並記錄日誌
-    read_cookie(log=True)
+def _cookie_disk_mtime():
+    try:
+        if os.path.exists(cookie_path):
+            return os.path.getmtime(cookie_path)
+    except OSError:
+        pass
+    return None
 
 
-def __parse_cookie_line(cookie_line):
+def _parse_cookie_string(raw_line):
+    raw_line = raw_line.replace('\n', '').strip()
+    if not raw_line or raw_line.startswith('#'):
+        return None
     cookies = {}
-    for part in cookie_line.replace('\n', '').split(';'):
+    for part in re.split(r';\s*', raw_line):
         part = part.strip()
         if not part or '=' not in part:
             continue
         key, value = part.split('=', 1)
-        cookies[key] = quote(value, safe='') if re.match(r'[\u4e00-\u9fa5]', value) else value
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if re.match(r'[\u4e00-\u9fa5]', key):
+            key = quote(key, safe='')
+        if re.match(r'[\u4e00-\u9fa5]', value):
+            value = quote(value, safe='')
+        cookies[key] = value
+    if not cookies:
+        return None
+    cookies.pop('ckBH_lastBoard', None)
+    if cookies.get('BAHAID') or cookies.get('BAHARUNE'):
+        cookies.pop('nologinuser', None)
     return cookies
 
 
-_CF_COOKIE_PREFIXES = ('__cf', 'cf_', '_cf')
-
-
-def strip_cf_cookies(cookies):
-    # Cloudflare 連線層 cookie 由 curl_cffi session jar 管理，不寫回 cookie.txt。
-    return {k: v for k, v in cookies.items() if not k.lower().startswith(_CF_COOKIE_PREFIXES)}
-
-
-def __cookie_dict_to_string(cookie_dict):
-    return '; '.join([key + '=' + str(value) for key, value in cookie_dict.items()])
-
-
-def __read_cookie_file_dict():
-    if not os.path.exists(cookie_path) or os.path.getsize(cookie_path) == 0:
+def _login_cookies_for_probe(cookies):
+    if not cookies:
         return {}
-    check_encoding(cookie_path)
-    with open(cookie_path, 'r', encoding='utf-8') as f:
-        for line in f.readlines():
-            if not line.isspace():
-                cookies = __parse_cookie_line(line)
-                cookies.pop('ckBH_lastBoard', 404)
-                return strip_cf_cookies(cookies)
-    return {}
+    login = dict(cookies)
+    if login.get('BAHAID') or login.get('BAHARUNE'):
+        login.pop('nologinuser', None)
+    return {k: v for k, v in login.items() if v and v != 'deleted'}
+
+
+def _empty_cookie_file():
+    try:
+        with open(cookie_path, 'w', encoding='utf-8') as f:
+            pass
+    except OSError:
+        pass
+
+
+def _disk_cookie_is_empty(cookies):
+    if cookies is None:
+        return True
+    login = _login_cookies_for_probe(cookies)
+    return not login.get('BAHAID') and not login.get('BAHARUNE')
+
+
+def _load_cookie_from_disk(log=False):
+    # 若存在 cookies.txt 或 cookie.txt.txt 則重新命名為 cookie.txt
+    try:
+        old_cookie_path = cookie_path.replace('cookie.txt', 'cookies.txt')
+        if os.path.exists(old_cookie_path):
+            os.rename(old_cookie_path, cookie_path)
+        error_cookie_path = cookie_path.replace('cookie.txt', 'cookie.txt.txt')
+        if os.path.exists(error_cookie_path):
+            os.rename(error_cookie_path, cookie_path)
+        if os.path.exists(cookie_path):
+            if os.path.getsize(cookie_path) == 0:
+                return None
+            if log:
+                __cookie_read_log('發現cookie檔案', display=False)
+            with open(cookie_path, 'r', encoding='utf-8', errors='replace') as f:
+                for line in f.readlines():
+                    if line.isspace():
+                        continue
+                    cookies = _parse_cookie_string(line)
+                    if _disk_cookie_is_empty(cookies):
+                        _empty_cookie_file()
+                        return None
+                    if log:
+                        __cookie_read_log('已讀取cookie', display=False)
+                    return cookies
+            _empty_cookie_file()
+            return None
+        try:
+            with open(cookie_path, 'w', encoding='utf-8') as f:
+                pass
+            if log:
+                __cookie_read_log('已建立 cookie.txt，請貼上瀏覽器 cookie', status=0)
+            return None
+        except BaseException as e:
+            __cookie_read_log('無法建立 cookie.txt: ' + str(e), status=1)
+            return None
+    except BaseException as e:
+        __cookie_read_log('讀取 cookie.txt 失敗: ' + str(e), status=1)
+        _empty_cookie_file()
+        return None
 
 
 def read_cookie(log=False):
-    # 若 cookie 已載入記憶體，則直接傳回
-    global cookie
-    if cookie is not None:
-        return dict(cookie)
-    # 相容舊版cookie命名
-    old_cookie_path = cookie_path.replace('cookie.txt', 'cookies.txt')
-    if os.path.exists(old_cookie_path):
-        os.rename(old_cookie_path, cookie_path)
-    # 防呆 https://github.com/miyouzi/aniGamerPlus/issues/5
-    error_cookie_path = cookie_path.replace('cookie.txt', 'cookie.txt.txt')
-    if os.path.exists(error_cookie_path):
-        os.rename(error_cookie_path, cookie_path)
-    # 使用者可以將cookie儲存在程式所在目錄下，儲存為 cookies.txt ，UTF-8 編碼
-    if os.path.exists(cookie_path):
-        # 防止 Cookie 檔案為空報錯
-        if os.path.getsize(cookie_path) == 0:
-            return None
-        # del_bom(cookie_path)  # 移除 bom
-        check_encoding(cookie_path)  # 移除 bom
-        if log:
-            __color_print(0, '讀取cookie', detail='發現cookie檔案', no_sn=True, display=False)
-        with open(cookie_path, 'r', encoding='utf-8') as f:
-            for line in f.readlines():
-                if not line.isspace():  # 跳過空白行
-                    cookies = __parse_cookie_line(line)
-                    cookies.pop('ckBH_lastBoard', 404)
-                    cookie = strip_cf_cookies(cookies)
-                    if log:
-                        __color_print(0, '讀取cookie', detail='已讀取cookie', no_sn=True, display=False)
-                    return dict(cookie)  # cookie僅一行, 讀到後馬上return
-    else:
-        __color_print(0, '讀取cookie', detail='未發現cookie檔案', no_sn=True, display=False)
-        cookie = {}
-        return cookie
-    # 如果什麼也沒讀到(空檔案)
-    __color_print(0, '讀取cookie', detail='cookie檔案為空', no_sn=True, status=1)
-    cookie = {}
+    global cookie, cookie_loaded, cookie_mtime_at_load, _cookie_reload_suppress_notice
+    global login_status_probe_mtime
+    with _cookie_load_lock:
+        disk_mtime = _cookie_disk_mtime()
+        if cookie_loaded and disk_mtime == cookie_mtime_at_load:
+            return cookie
+
+        user_edited_file = cookie_loaded and disk_mtime != cookie_mtime_at_load
+        cookie = _load_cookie_from_disk(log=log)
+        cookie_loaded = True
+        cookie_mtime_at_load = _cookie_disk_mtime()
+
+        if cookie is None and not _cookie_reload_suppress_notice:
+            if log or user_edited_file:
+                __cookie_read_log('cookie檔案為空', status=1)
+
+        if user_edited_file and not _cookie_reload_suppress_notice:
+            if cookie:
+                __cookie_read_log('cookie.txt 已變更，已重新載入', status=2)
+            login_status_probe_mtime = None
+        _cookie_reload_suppress_notice = False
     return cookie
 
 
+def probe_bahamut_login(sn=None):
+    """呼叫 getdeviceid/token，回傳 (state, detail)。"""
+    if sn is None:
+        sn = LOGIN_PROBE_SN
+    cookies = read_cookie(log=False)
+    login_cookies = _login_cookies_for_probe(cookies)
+    if not login_cookies.get('BAHAID') and not login_cookies.get('BAHARUNE'):
+        return 'guest', GUEST_COOKIE_DETAIL
+
+    settings = read_settings()
+    ua = settings['ua']
+    headers = {
+        'User-Agent': ua,
+        'Referer': 'https://ani.gamer.com.tw/animeVideo.php?sn=' + str(sn),
+        'Origin': 'https://ani.gamer.com.tw',
+    }
+    proxies = None
+    if settings.get('use_proxy') and settings.get('proxy'):
+        proxies = {'http': settings['proxy'], 'https': settings['proxy']}
+
+    session = requests.Session()
+    for key, value in login_cookies.items():
+        session.cookies.set(key, value, domain='.gamer.com.tw')
+
+    try:
+        device_resp = session.get(
+            'https://ani.gamer.com.tw/ajax/getdeviceid.php',
+            headers=headers, timeout=15, proxies=proxies)
+        device_resp.raise_for_status()
+        device = device_resp.json().get('deviceid')
+        if not device:
+            return 'error', '無法取得 device id'
+
+        token_url = (
+            'https://ani.gamer.com.tw/ajax/token.php?adID=0&sn=' + str(sn)
+            + '&device=' + device + '&hash=' + ''.join(
+                random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(12)))
+        token_resp = session.get(token_url, headers=headers, timeout=15, proxies=proxies)
+        data = token_resp.json()
+        if 'error' in data:
+            err = data['error']
+            return 'error', 'code=' + str(err.get('code', '')) + ' ' + str(err.get('message', '')).strip()
+        if data.get('vip'):
+            nick = login_cookies.get('BAHANICK') or login_cookies.get('BAHAID') or ''
+            if nick:
+                return 'vip', '已登入 VIP（' + str(nick) + '）'
+            return 'vip', '已登入 VIP 帳戶'
+        return 'login', '非 VIP 帳戶'
+    except BaseException as e:
+        return 'error', '登入檢查失敗: ' + str(e)
+
+
+def _login_status_label(state):
+    return {'guest': '遊客', 'vip': 'VIP', 'login': '已登入', 'error': '異常'}.get(state, state)
+
+
+def report_login_status(sn=None, log=True):
+    global login_status_cache, login_status_probe_mtime, _login_status_reporting
+    if _login_status_reporting:
+        return dict(login_status_cache)
+    _login_status_reporting = True
+    try:
+        state, detail = probe_bahamut_login(sn=sn)
+        label = _login_status_label(state)
+        login_status_cache = {'state': state, 'label': label, 'detail': detail}
+        login_status_probe_mtime = _cookie_disk_mtime()
+        if not log:
+            return login_status_cache
+        summary = '登入狀態：' + label + '，' + detail
+        if state == 'vip':
+            __color_print(0, '', detail=summary, status=2, no_sn=True)
+        elif state in ('guest', 'error'):
+            __color_print(0, '', detail=summary, status=1, no_sn=True)
+        else:
+            __color_print(0, '', detail=summary, status=0, no_sn=True)
+        return login_status_cache
+    except BaseException as e:
+        login_status_cache = {'state': 'error', 'label': '異常', 'detail': '登入檢查失敗: ' + str(e)}
+        login_status_probe_mtime = _cookie_disk_mtime()
+        if log:
+            __color_print(0, '', detail='登入狀態：異常，' + login_status_cache['detail'], status=1, no_sn=True)
+        return login_status_cache
+    finally:
+        _login_status_reporting = False
+
+
+def get_login_status(for_dashboard=False):
+    global login_status_probe_mtime
+    try:
+        disk_mtime = _cookie_disk_mtime()
+        if login_status_cache.get('state') == 'unknown' or login_status_probe_mtime != disk_mtime:
+            report_login_status(log=not for_dashboard)
+    except BaseException as e:
+        login_status_cache.update({'state': 'error', 'label': '異常', 'detail': '讀取 cookie 失敗: ' + str(e)})
+    return dict(login_status_cache)
+
+
+def startup_cookie_check():
+    read_cookie(log=True)
+    report_login_status()
+
+
+def test_cookie():
+    # 讀取 cookie.txt 並寫入日誌
+    read_cookie(log=True)
+
+
 def invalid_cookie():
-    # 僅重置記憶體中的 cookie，不修改、不移除 cookie.txt
-    global cookie
+    # 清除記憶體 cookie 快取，不修改 cookie.txt
+    global cookie, cookie_loaded, cookie_mtime_at_load
     cookie = None
+    cookie_loaded = False
+    cookie_mtime_at_load = None
 
 
 def time_stamp_to_time(timestamp):
@@ -833,66 +999,50 @@ def time_stamp_to_time(timestamp):
 
 def get_cookie_time():
     # 取得 cookie 修改時間
+    if not os.path.exists(cookie_path):
+        return ''
     cookie_time = os.path.getmtime(cookie_path)
     return time_stamp_to_time(cookie_time)
 
 
-cookie_write_lock = threading.Lock()
-
-
 def renew_cookies(new_cookie, log=True):
-    return renew_cookies_if_current(new_cookie, log=log)
-
-
-def renew_cookies_if_current(new_cookie, previous_baharune=None, log=True):
-    global cookie
-    if not new_cookie:
-        return
-    new_cookie = strip_cf_cookies(dict(new_cookie))
-    new_cookie_str = __cookie_dict_to_string(new_cookie)
-    with cookie_write_lock:
-        cookie = None  # 重置cookie
+    # 將 cookie 字典序列化寫入 cookie.txt
+    global cookie, cookie_loaded, cookie_mtime_at_load, _cookie_reload_suppress_notice
+    cookie = None
+    cookie_loaded = False
+    cookie_mtime_at_load = None
+    new_cookie_str = ''
+    for key, value in new_cookie.items():
+        new_cookie_str = new_cookie_str + key + '=' + str(value) + '; '
+    new_cookie_str = new_cookie_str[0:-2]
+    try_counter = 0
+    while True:
         try:
-            current_cookie = __read_cookie_file_dict()
-        except BaseException:
-            current_cookie = {}
-
-        current_baharune = current_cookie.get('BAHARUNE')
-        new_baharune = new_cookie.get('BAHARUNE')
-        if previous_baharune and current_baharune and new_baharune:
-            if current_baharune != previous_baharune and current_baharune != new_baharune:
-                if log:
-                    __color_print(0, '略過舊cookie寫回，cookie.txt已被其他任務更新', no_sn=True, display=False)
-                return
-
-        if current_cookie and __cookie_dict_to_string(current_cookie) == new_cookie_str:
-            return
-
-        try_counter = 0
-        while True:
-            try:
-                with open(cookie_path, 'w', encoding='utf-8') as f:
-                    f.write(new_cookie_str)
-            except BaseException as e:
-                if try_counter > 3:
-                    __color_print(0, '新cookie儲存失敗! 發生異常: ' + str(e), status=1, no_sn=True)
-                    break
-                random_wait_time = random.uniform(2, 5)
-                time.sleep(random_wait_time)
-                try_counter = try_counter + 1
-            else:
-                if log:
-                    __color_print(0, '新cookie儲存成功', no_sn=True, display=False)
+            with open(cookie_path, 'w', encoding='utf-8') as f:
+                f.write(new_cookie_str)
+        except BaseException as e:
+            if try_counter > 3:
+                __color_print(0, '新cookie儲存失敗! 發生異常: ' + str(e), status=1, no_sn=True)
                 break
+            random_wait_time = random.uniform(2, 5)
+            time.sleep(random_wait_time)
+            try_counter = try_counter + 1
+        else:
+            if log:
+                __color_print(0, '新cookie儲存成功', no_sn=True, display=False)
+            _cookie_reload_suppress_notice = True
+            read_cookie(log=False)
+            report_login_status(log=False)
+            break
 
 
 def bahamut_request(method, url, **kwargs):
-    # 巴哈站點請求統一走 curl-cffi，通過 TLS 指紋驗證
+    # 以 curl_cffi Session 發送請求，impersonate 依 UA 選擇
     settings = read_settings()
     if 'firefox' in settings['ua'].lower():
-        impersonate = 'firefox'
+        impersonate = 'firefox135'
     else:
-        impersonate = 'chrome124'
+        impersonate = 'chrome131'
     headers = dict(kwargs.pop('headers', None) or {})
     if not any(k.lower() == 'user-agent' for k in headers):
         headers['User-Agent'] = settings['ua']

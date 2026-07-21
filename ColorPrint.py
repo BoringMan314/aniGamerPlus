@@ -5,7 +5,7 @@
 # @File    : Color.py
 # @Software: PyCharm
 
-import ctypes, subprocess, platform, os, json, re
+import ctypes, subprocess, platform, os, json, re, sys
 from termcolor import cprint
 from datetime import datetime
 import Config
@@ -47,10 +47,20 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
     # 2019-01-30 17:22:30 更新狀態: sn=12345 檢查更新失敗, 跳過等待下次檢查
     green = False
 
+    def should_use_windows_color_api():
+        if platform.system() != 'Windows':
+            return False
+        if getattr(sys, 'frozen', False):
+            return True
+        try:
+            check_tty = subprocess.Popen('tty', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            tty_out = check_tty.stdout.read().decode('utf-8', errors='ignore').strip()
+            return tty_out in ('', '/dev/cons0')
+        except BaseException:
+            return True
+
     def succeed_or_failed_print():
-        check_tty = subprocess.Popen('tty', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        check_tty_return_str = check_tty.stdout.read().decode("utf-8")[0:-1]
-        if 'Windows' in platform.system() and check_tty_return_str in ('/dev/cons0', ''):
+        if should_use_windows_color_api():
             clr = Color()
             if green:
                 clr.print_green_text(msg)

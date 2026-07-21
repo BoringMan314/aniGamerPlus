@@ -7,7 +7,6 @@
 
 # 非阻塞
 from gevent import monkey; monkey.patch_all()
-from gevent.threadpool import ThreadPool
 
 import json, sys, os, re, time
 import threading, traceback
@@ -17,7 +16,7 @@ from aniGamerPlus import Config
 from flask import Flask, request, jsonify
 from flask import render_template
 from flask_basicauth import BasicAuth
-from aniGamerPlus import __cui as cui
+from aniGamerPlus import __cui as cui, init_download_limiter
 import logging, termcolor
 from ColorPrint import err_print
 from logging.handlers import TimedRotatingFileHandler
@@ -87,9 +86,6 @@ with open(id_list_path, 'r', encoding='utf-8') as f:
     id_list = re.sub(r'(var id_list\s*=\s*|\s*\n?)', '', f.read()).replace('\'', '"')
     id_list = json.loads(id_list)
 
-# 手動任務 ThreadPool（與 gevent WSGI 分離）
-_manual_task_pool = ThreadPool(4)
-
 
 @app.route('/')
 def home():
@@ -157,10 +153,12 @@ def manual_task():
         thread_limit = thread
 
     def run_cui():
+        init_download_limiter(thread_limit)
         cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False,
-            cui_danmu=data['danmu'], dashboard_worker=True)
+            cui_danmu=data['danmu'])
 
-    _manual_task_pool.spawn(run_cui)
+    worker = threading.Thread(target=run_cui)
+    worker.start()
     err_print(0, 'Dashboard', '透過 Web 控制面板下達了手動任務', no_sn=True, status=2)
     return jsonify({'status': '200'})
 

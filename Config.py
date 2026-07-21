@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.9'
+aniGamerPlus_version = 'v24.9.10'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
@@ -78,11 +78,8 @@ def get_tasks_progress_rate():
 
 def __color_print(sn, err_msg, detail='', status=0, no_sn=False, display=True):
     # 避免與 ColorPrint.py 相互呼叫產生問題
-    try:
-        err_print(sn, err_msg, detail=detail, status=status, no_sn=no_sn, display=display)
-    except UnboundLocalError:
-        from ColorPrint import err_print
-        err_print(sn, err_msg, detail=detail, status=status, no_sn=no_sn, display=display)
+    from ColorPrint import err_print
+    err_print(sn, err_msg, detail=detail, status=status, no_sn=no_sn, display=display)
 
 
 def __cookie_read_log(detail, status=0, display=True):
@@ -944,19 +941,19 @@ def report_login_status(sn=None, log=True):
         login_status_probe_mtime = _cookie_disk_mtime()
         if not log:
             return login_status_cache
-        summary = '登入狀態：' + label + '，' + detail
-        if state == 'vip':
-            __color_print(0, '', detail=summary, status=2, no_sn=True)
+        summary = label + '，' + detail
+        if state in ('vip', 'login'):
+            __color_print(0, '登入狀態', detail=summary, status=2, no_sn=True)
         elif state in ('guest', 'error'):
-            __color_print(0, '', detail=summary, status=1, no_sn=True)
+            __color_print(0, '登入狀態', detail=summary, status=1, no_sn=True)
         else:
-            __color_print(0, '', detail=summary, status=0, no_sn=True)
+            __color_print(0, '登入狀態', detail=summary, status=0, no_sn=True)
         return login_status_cache
     except BaseException as e:
         login_status_cache = {'state': 'error', 'label': '異常', 'detail': '登入檢查失敗: ' + str(e)}
         login_status_probe_mtime = _cookie_disk_mtime()
         if log:
-            __color_print(0, '', detail='登入狀態：異常，' + login_status_cache['detail'], status=1, no_sn=True)
+            __color_print(0, '登入狀態', detail='異常，' + login_status_cache['detail'], status=1, no_sn=True)
         return login_status_cache
     finally:
         _login_status_reporting = False

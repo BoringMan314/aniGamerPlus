@@ -755,7 +755,8 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         os.popen(settings['user_command'])
         err_print(0, '任務完成', '已執行使用者命令', no_sn=True, status=2)
 
-    sys.exit(0)
+    if not settings['use_dashboard']:
+        sys.exit(0)
 
 
 def __kill_thread_when_ctrl_c():

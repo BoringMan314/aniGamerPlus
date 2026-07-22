@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.11'
+aniGamerPlus_version = 'v24.9.12'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
@@ -39,6 +39,8 @@ LOGIN_STATUS_REFRESH_COOLDOWN = 10
 login_status_cache = {'state': 'unknown', 'label': '', 'detail': ''}
 login_status_probe_mtime = None
 LOGIN_PROBE_SN = 878
+_parse_sn_cd_lock = threading.Lock()
+_parse_sn_cd_next_allowed = 0.0
 GUEST_COOKIE_DETAIL = 'cookie.txt 為空（請貼上瀏覽器 cookie）'
 max_multi_thread = 5
 max_multi_downloading_segment = 5
@@ -124,6 +126,31 @@ def __cookie_read_log(detail, status=0, display=True):
 
 def get_max_multi_thread():
     return max_multi_thread
+
+
+def wait_parse_sn_cd():
+    """全程式 SN 頁解析節流（在背景 worker 內 sleep，不阻塞 Dashboard 接令）。"""
+    settings = read_settings()
+    cd = int(settings.get('parse_sn_cd', 0))
+    if cd <= 0:
+        return
+    with _parse_sn_cd_lock:
+        now = time.monotonic()
+        wait = _parse_sn_cd_next_allowed - now
+        if wait > 0:
+            secs = int(wait) if wait == int(wait) else int(wait) + 1
+            __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
+            time.sleep(wait)
+
+
+def finish_parse_sn_cd():
+    global _parse_sn_cd_next_allowed
+    settings = read_settings()
+    cd = int(settings.get('parse_sn_cd', 0))
+    if cd <= 0:
+        return
+    with _parse_sn_cd_lock:
+        _parse_sn_cd_next_allowed = time.monotonic() + cd
 
 
 def legalize_filename(filename):

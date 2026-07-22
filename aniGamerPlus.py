@@ -66,6 +66,7 @@ def _update_monitor_after_parse(anime, sn, resolution='', status='正在解析')
 
 def build_anime(sn):
     anime = {'anime': None, 'failed': True}
+    Config.wait_parse_sn_cd()
     try:
         if settings['use_gost']:
             # 若使用 gost，則隨機指定一個 gost 監聽連接埠
@@ -82,11 +83,8 @@ def build_anime(sn):
     except BaseException as e:
         err_print(sn, '抓取失敗', '抓取影片資訊時發生未知錯誤: '+str(e), status=1)
         err_print(sn, '抓取異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
-
-    # sn 解析冷卻
-    if settings['parse_sn_cd'] > 0:
-        err_print("更新資訊", "SN 解析冷卻 " + str(settings['parse_sn_cd']) + " 秒", no_sn=True)
-        time.sleep(settings['parse_sn_cd'])
+    finally:
+        Config.finish_parse_sn_cd()
 
     return anime
 
@@ -476,9 +474,10 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
                 err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
                 anime.video_size = 0
 
-    download_cd = threading.Thread(target=download_cd_counter, kwargs={'release_limiter': False})
+    download_cd = threading.Thread(target=download_cd_counter)
     download_cd.start()
-    thread_limiter.release()
+    download_cd.join()
+    err_print(sn, '任務完成', status=2)
 
 
 def __get_info_only(sn):
@@ -531,12 +530,49 @@ def _normalize_thread_limit(limit):
     return limit
 
 
+class _DownloadSlotLimiter:
+    """可動態調整上限的下載併發限制（取代 Semaphore，支援重載 config / 手動 thread）。"""
+
+    def __init__(self, limit):
+        self._cond = threading.Condition()
+        self._limit = _normalize_thread_limit(limit)
+        self._held = 0
+
+    def acquire(self):
+        with self._cond:
+            while self._held >= self._limit:
+                self._cond.wait()
+            self._held += 1
+
+    def release(self):
+        with self._cond:
+            if self._held <= 0:
+                raise ValueError('release on unused download limiter')
+            self._held -= 1
+            self._cond.notify()
+
+    def set_limit(self, limit):
+        with self._cond:
+            self._limit = _normalize_thread_limit(limit)
+            self._cond.notify_all()
+
+
+thread_limiter = None
+
+
+def apply_download_limiter(limit):
+    global thread_limiter
+    if thread_limiter is None:
+        thread_limiter = _DownloadSlotLimiter(limit)
+    else:
+        thread_limiter.set_limit(limit)
+
+
 def init_download_limiter(limit=None):
     """建立程式生命週期內共用的下載 limiter（sn_list 自動模式 + Web 手動任務）。"""
-    global thread_limiter
     if limit is None:
         limit = settings['multi-thread']
-    thread_limiter = threading.Semaphore(_normalize_thread_limit(limit))
+    apply_download_limiter(limit)
 
 
 download_fifo = Queue()
@@ -588,9 +624,9 @@ def ensure_fifo_workers():
     with _fifo_workers_lock:
         if _fifo_workers_started:
             return
-        n = _normalize_thread_limit(settings['multi-thread'])
-        for _ in range(n):
-            t = threading.Thread(target=_fifo_worker_main, daemon=True, name='download-fifo-worker')
+        n = Config.get_max_multi_thread()
+        for i in range(n):
+            t = threading.Thread(target=_fifo_worker_main, daemon=True, name='download-fifo-worker-' + str(i + 1))
             t.start()
         _fifo_workers_started = True
 
@@ -650,17 +686,16 @@ def _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit):
 
 
 def reset_download_limiter_for_cli(limit):
-    """僅命令列單次執行時設定 limiter；該路徑會 sys.exit，不與自動模式共存。"""
-    global thread_limiter
-    thread_limiter = threading.Semaphore(_normalize_thread_limit(limit))
+    """命令列單次執行時設定 limiter；該路徑會 sys.exit，不與自動模式共存。"""
+    apply_download_limiter(limit)
 
 
 def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
           cui_save_dir='', classify=True, get_info=False, user_cmd=False, realtime_show=True, cui_danmu=False,
           dashboard_worker=False):
-    # 保留 thread_limiter 狀態供後續任務排隊
     global danmu
     danmu = cui_danmu
+    apply_download_limiter(cui_thread_limit)
 
     if realtime_show:
         if cui_thread_limit == 1 or cui_download_mode in ('single', 'latest', 'largest-sn'):
@@ -1236,6 +1271,7 @@ if __name__ == '__main__':
             sn_dict = Config.read_sn_list()
         if settings['read_config_when_checking_update']:
             settings = Config.read_settings()
+            apply_download_limiter(settings['multi-thread'])
         danmu = settings['danmu'] # 避免手動加入工作時，global 覆寫掉 config 的 danmu 設定
         check_tasks()  # 檢查更新，生成任務佇列
         new_tasks_counter = 0  # 新增任務計數器

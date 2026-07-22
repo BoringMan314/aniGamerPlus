@@ -105,11 +105,15 @@ class Anime:
             os.environ['NO_PROXY'] = "127.0.0.1,localhost"
 
     def renew(self):
-        self.__get_src()
-        self.__get_title()
-        self.__get_bangumi_name()
-        self.__get_episode()
-        self.__get_episode_list()
+        Config.wait_parse_sn_cd()
+        try:
+            self.__get_src()
+            self.__get_title()
+            self.__get_bangumi_name()
+            self.__get_episode()
+            self.__get_episode_list()
+        finally:
+            Config.finish_parse_sn_cd()
 
     def get_sn(self):
         return self._sn

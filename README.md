@@ -154,7 +154,7 @@ docker run -td --name anigamerplus \
     "classify_season": false,  // 控制是否建立季度子目錄
     "check_frequency": 5,  // 檢查更新頻率, 單位為分鐘
     "download_cd": 5,  // # 下載冷卻時間(秒)
-    "parse_sn_cd": 3,  // sn 頁面(即播放介面)解析冷卻時間(秒)
+    "parse_sn_cd": 3,  // sn 頁面(即播放介面)解析冷卻時間(秒)，全程式節流（多執行緒並下載時仍生效）
     "download_resolution": "1080",  // 下載選取清晰度, 若該清晰度不存在將會選取最近可用清晰度, 可選 360 480 540 576 720 1080
     "lock_resolution": false,  // 鎖定清晰度, 如果指定清晰度不存在, 則放棄下載
     "only_use_vip": false,  // 鎖定 VIP 帳號下載
@@ -204,7 +204,7 @@ docker run -td --name anigamerplus \
     "danmu_ban_words": [], // 額外過濾彈幕關鍵字(支援python的正規表示式、英文不區分大小寫)
     "check_latest_version": true,  // 是否檢查更新
     "read_sn_list_when_checking_update": true,  // 是否在檢查更新時讀取sn_list.txt, 開啟後對sn_list.txt的更改將會在下次檢查更新時生效而不用重啟程式
-    "read_config_when_checking_update": true,  // 是否在檢查更新時讀取配置檔案, 開啟後對配置檔案的更改將會在下次檢查時更新生效而不用重啟程式
+    "read_config_when_checking_update": true,  // 是否在檢查更新時讀取配置檔案, 開啟後對配置檔案的更改將會在下次檢查時更新生效而不用重啟程式（含 multi-thread、download_cd、parse_sn_cd 等）
     "ads_time": 25,  // 非VIP廣告等待時間, 如果等待時間不足, 程式會自行追加時間 (最大20秒)
     "mobile_ads_time": 25  // 使用移動端API解析的廣告等待時間
     "use_dashboard": true  // Web 控制面板開關
@@ -413,7 +413,7 @@ sqlite3資料庫, 可以使用 [SQLite Expert](http://www.sqliteexpert.com/) 等
 參數:
 ```
 >python3 aniGamerPlus.py -h
-當前aniGamerPlus版本: v24.9.11
+當前aniGamerPlus版本: v24.9.12
 usage: aniGamerPlus.py [-h] [--sn SN] [--resolution {360,480,540,576,720,1080}] [--download_mode {single,latest,largest-sn,multi,all,range,list,sn-list,sn-range,db}]
                        [--thread_limit THREAD_LIMIT] [--current_path] [--episodes EPISODES] [--no_classify] [--user_command] [--information_only] [--danmu] [--my_anime]
 

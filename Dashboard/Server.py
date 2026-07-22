@@ -218,21 +218,34 @@ def tasks_progress(ws):
             body['login'] = Config.get_login_status(for_dashboard=True)
         else:
             body['login'] = dict(Config.login_status_cache)
-        ws.send(json.dumps(body, ensure_ascii=False, separators=(',', ':')))
+        try:
+            ws.send(json.dumps(body, ensure_ascii=False, separators=(',', ':')))
+        except WebSocketError:
+            try:
+                ws.close()
+            except BaseException:
+                pass
+        except OSError:
+            try:
+                ws.close()
+            except BaseException:
+                pass
 
     ws_tick = 0
     pending_push = None
     while not ws.closed:
         try:
             ws_tick += 1
-            if pending_push is not None and not pending_push.dead:
-                pending_push.kill()
+            if pending_push is not None:
+                if not pending_push.dead:
+                    pending_push.kill()
+                pending_push = None
             pending_push = spawn(push_progress, ws_tick)
         except WebSocketError:
-            ws.close()
             break
         except BaseException:
             logger.exception('tasks_progress WebSocket 推送失敗')
+            break
         gevent_sleep(1)
 
 

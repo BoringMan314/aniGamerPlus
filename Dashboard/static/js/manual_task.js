@@ -19,6 +19,32 @@ function initManualTaskModal() {
 	});
 }
 
+function setManualSubmitBusy(busy) {
+	var $btn = $('#manual_submit_btn');
+	if (!$btn.length) {
+		return;
+	}
+	if (busy) {
+		$btn.prop('disabled', true).data('orig-text', $btn.text()).text('提交中…');
+	} else {
+		var orig = $btn.data('orig-text') || '提交';
+		$btn.prop('disabled', false).text(orig);
+	}
+}
+
+function flashManualSubmitOk() {
+	var $btn = $('#manual_submit_btn');
+	if (!$btn.length) {
+		return;
+	}
+	$btn.prop('disabled', false).text('已提交');
+	setTimeout(function() {
+		if ($('#manualTasks').hasClass('show')) {
+			$btn.text('提交');
+		}
+	}, 1200);
+}
+
 function readManualConfig() {
 	var manualData = {};
 	var link = $('#manual_link').val();
@@ -34,10 +60,13 @@ function readManualConfig() {
 	manualData['thread'] = $('#manual_thread_limit').val();
 	manualData['danmu'] = $('#manual_danmu').is(':checked');
 
+	setManualSubmitBusy(true);
+
 	$.ajax({
 		url: '/manualTask',
 		type: 'post',
 		dataType: 'json',
+		timeout: 8000,
 		headers: {
 			'Content-Type': 'application/json;charset=utf-8'
 		},
@@ -45,19 +74,21 @@ function readManualConfig() {
 		data: JSON.stringify(manualData),
 		success: function(data) {
 			$('#manual_link').val('').focus();
-			resetUploadStatusModal();
-			$('#uploadOk .upload-status').text('任務已成功提交');
-			$('#uploadOk').show();
-			$('#uploadStatus').off('hidden.bs.modal.uploadStatusChain');
-			$('#uploadStatus').one('hidden.bs.modal.uploadStatusChain', function() {
-				$('#uploadOk .upload-status').text('配置已成功提交');
-				$('#manualTasks').modal('show');
-			});
-			$('#uploadStatus').modal('show');
+			flashManualSubmitOk();
+			if (window.refreshTaskMonitor) {
+				window.refreshTaskMonitor();
+			}
 		},
-		error: function(status) {
+		error: function(xhr) {
+			setManualSubmitBusy(false);
 			resetUploadStatusModal();
-			$('#uploadFailed .upload-status').text('任務提交失敗');
+			var msg = '任務提交失敗';
+			if (xhr && xhr.status === 503) {
+				msg = '手動任務佇列已滿，請稍後再試';
+			} else if (xhr && xhr.statusText === 'timeout') {
+				msg = '伺服器回應逾時，任務可能已入隊，請看監控或 log';
+			}
+			$('#uploadFailed .upload-status').text(msg);
 			$('#uploadFailed').show();
 			$('#uploadStatus').off('hidden.bs.modal.uploadStatusChain');
 			$('#uploadStatus').one('hidden.bs.modal.uploadStatusChain', function() {

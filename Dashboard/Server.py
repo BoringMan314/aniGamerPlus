@@ -7,16 +7,18 @@
 
 # 非阻塞
 from gevent import monkey; monkey.patch_all()
+from gevent import sleep as gevent_sleep, spawn
 
 import json, sys, os, re, time
 import threading, traceback
 import random, string
+from queue import Queue, Full
 
 from aniGamerPlus import Config
 from flask import Flask, request, jsonify
 from flask import render_template
 from flask_basicauth import BasicAuth
-from aniGamerPlus import __cui as cui, init_download_limiter
+from aniGamerPlus import __cui as cui
 import logging, termcolor
 from ColorPrint import err_print
 from logging.handlers import TimedRotatingFileHandler
@@ -49,6 +51,54 @@ logger.propagate = False  # 不在控制面板上輸出
 
 # websocket鑑權需要的 token, 隨機一個 32 位初始 token
 websocket_token = ''.join(random.sample(string.ascii_letters + string.digits, 32))
+
+_manual_task_queue = Queue(maxsize=32)
+
+
+def _process_manual_task_raw(raw):
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        err_print(0, 'Dashboard', '手動任務 JSON 格式錯誤', no_sn=True, status=1)
+        return
+    settings = Config.read_settings()
+
+    if data['resolution'] not in ('360', '480', '540', '720', '1080'):
+        resolution = settings['download_resolution']
+    else:
+        resolution = data['resolution']
+
+    if data['mode'] not in ('single', 'latest', 'all', 'largest-sn'):
+        mode = 'single'
+    else:
+        mode = data['mode']
+
+    if data['thread']:
+        thread = int(data['thread'])
+    else:
+        thread = 1
+    if thread > Config.get_max_multi_thread():
+        thread_limit = Config.get_max_multi_thread()
+    else:
+        thread_limit = thread
+
+    err_print(0, 'Dashboard', '透過 Web 控制面板下達了手動任務', no_sn=True, status=2)
+    cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False,
+        cui_danmu=data['danmu'], dashboard_worker=True)
+
+
+def _manual_task_worker():
+    while True:
+        raw = _manual_task_queue.get()
+        try:
+            _process_manual_task_raw(raw)
+        except BaseException:
+            logger.exception('手動任務處理失敗')
+        finally:
+            _manual_task_queue.task_done()
+
+
+threading.Thread(target=_manual_task_worker, daemon=True, name='dashboard-manual-dispatcher').start()
 
 
 # 處理 Flask 寫日誌到檔案帶有顏色控制符的問題
@@ -125,41 +175,11 @@ def recv_config():
 
 @app.route('/manualTask', methods=['POST'])
 def manual_task():
-    data = json.loads(request.get_data(as_text=True))
-    settings = Config.read_settings()
-
-    # 下載清晰度
-    if data['resolution'] not in ('360', '480', '540', '720', '1080'):
-        # 如果不是合法清晰度
-        resolution = settings['download_resolution']
-    else:
-        resolution = data['resolution']
-
-    # 下載模式
-    if data['mode'] not in ('single', 'latest', 'all', 'largest-sn'):
-        mode = 'single'
-    else:
-        mode = data['mode']
-
-    # 下載執行緒數
-    if data['thread']:
-        thread = int(data['thread'])
-    else:
-        thread = 1
-    if thread > Config.get_max_multi_thread():
-        # 是否超過最大允許執行緒數
-        thread_limit = Config.get_max_multi_thread()
-    else:
-        thread_limit = thread
-
-    def run_cui():
-        init_download_limiter(thread_limit)
-        cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False,
-            cui_danmu=data['danmu'])
-
-    worker = threading.Thread(target=run_cui)
-    worker.start()
-    err_print(0, 'Dashboard', '透過 Web 控制面板下達了手動任務', no_sn=True, status=2)
+    raw = request.get_data(as_text=True)
+    try:
+        _manual_task_queue.put_nowait(raw)
+    except Full:
+        return jsonify({'status': '503', 'error': '手動任務佇列已滿，請稍後再試'}), 503
     return jsonify({'status': '200'})
 
 
@@ -184,26 +204,36 @@ def tasks_progress(ws):
     if token != websocket_token:
         ws.send('Unauthorized')
         ws.close()
-    else:
-        # 一次性 token
-        websocket_token = ''
+        return
+    # 一次性 token
+    websocket_token = ''
 
-    # 推送任務進度資料
-    # https://blog.csdn.net/sinat_32651363/article/details/87912701
+    def push_progress(tick):
+        if ws.closed:
+            return
+        body = {
+            'tasks': Config.get_tasks_progress_rate(),
+        }
+        if tick == 1 or tick % 10 == 0:
+            body['login'] = Config.get_login_status(for_dashboard=True)
+        else:
+            body['login'] = dict(Config.login_status_cache)
+        ws.send(json.dumps(body, ensure_ascii=False, separators=(',', ':')))
+
+    ws_tick = 0
+    pending_push = None
     while not ws.closed:
         try:
-            payload = {
-                'tasks': Config.get_tasks_progress_rate(),
-                'login': Config.get_login_status(for_dashboard=True),
-            }
-            msg = json.dumps(payload)
-            ws.send(msg)
+            ws_tick += 1
+            if pending_push is not None and not pending_push.dead:
+                pending_push.kill()
+            pending_push = spawn(push_progress, ws_tick)
         except WebSocketError:
             ws.close()
             break
         except BaseException:
             logger.exception('tasks_progress WebSocket 推送失敗')
-        time.sleep(1)
+        gevent_sleep(1)
 
 
 @app.route('/sn_list', methods=['POST'])

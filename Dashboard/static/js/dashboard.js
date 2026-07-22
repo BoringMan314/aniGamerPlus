@@ -82,7 +82,8 @@
 		});
 		showPage(getInitialPage());
 		refreshLoginStatus();
-		if (window.ensureTaskProgressSocket) {
+		var initialPage = getInitialPage();
+		if (initialPage !== 'monitor' && window.ensureTaskProgressSocket) {
 			window.ensureTaskProgressSocket();
 		}
 	});

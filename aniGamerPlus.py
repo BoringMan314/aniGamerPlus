@@ -14,6 +14,7 @@ import os, sys, time, re, random, traceback, argparse
 import signal
 import sqlite3
 import threading
+from queue import Queue
 import subprocess
 import platform
 import socket
@@ -49,6 +50,18 @@ def gost_port():
         # 若該連接埠不可用
         random_port = random.randint(40000, 60000)
     return random_port
+
+
+def _update_monitor_after_parse(anime, sn, resolution='', status='正在解析'):
+    try:
+        Config.update_task_monitor(
+            int(sn),
+            rate=0,
+            status=status,
+            filename=anime.get_monitor_filename_for_sn(sn, resolution or None),
+        )
+    except BaseException:
+        Config.update_task_monitor(int(sn), rate=0, status=status, filename='')
 
 
 def build_anime(sn):
@@ -272,6 +285,7 @@ def worker(sn, sn_info, realtime_show_file_size=False):
         return
 
     anime = anime['anime']
+    _update_monitor_after_parse(anime, sn, settings['download_resolution'], '正在解析')
 
     try:
         anime.download(settings['download_resolution'], bangumi_tag=bangumi_tag, rename=rename,
@@ -417,6 +431,7 @@ def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_siz
         thread_limiter.release()
         return
     anime = anime['anime']
+    _update_monitor_after_parse(anime, sn, dl_resolution, '正在解析')
 
     try:
         if dl_resolution:
@@ -524,6 +539,116 @@ def init_download_limiter(limit=None):
     thread_limiter = threading.Semaphore(_normalize_thread_limit(limit))
 
 
+download_fifo = Queue()
+_fifo_workers_lock = threading.Lock()
+_fifo_workers_started = False
+_download_sn_active = set()
+_download_sn_active_lock = threading.Lock()
+
+
+def _try_claim_download_sn(sn):
+    sn = int(sn)
+    with _download_sn_active_lock:
+        if sn in _download_sn_active:
+            return False
+        _download_sn_active.add(sn)
+        return True
+
+
+def _release_download_sn(sn):
+    with _download_sn_active_lock:
+        _download_sn_active.discard(int(sn))
+
+
+def _fifo_worker_main():
+    while True:
+        job = download_fifo.get()
+        release_sn = None
+        try:
+            job_type = job['type']
+            if job_type == 'download_only':
+                release_sn = int(job['kwargs']['sn'])
+                __download_only(**job['kwargs'])
+            elif job_type == 'worker':
+                release_sn = int(job['sn'])
+                worker(job['sn'], job['sn_info'], job.get('realtime_show_file_size', False))
+            elif job_type == 'get_info_only':
+                __get_info_only(job['sn'])
+        except BaseException as e:
+            err_print(0, '下載佇列', '任務執行異常: ' + str(e), status=1, no_sn=True)
+            err_print(0, '下載佇列', traceback.format_exc(), status=1, no_sn=True, display=False)
+        finally:
+            if release_sn is not None:
+                _release_download_sn(release_sn)
+            download_fifo.task_done()
+
+
+def ensure_fifo_workers():
+    global _fifo_workers_started
+    with _fifo_workers_lock:
+        if _fifo_workers_started:
+            return
+        n = _normalize_thread_limit(settings['multi-thread'])
+        for _ in range(n):
+            t = threading.Thread(target=_fifo_worker_main, daemon=True, name='download-fifo-worker')
+            t.start()
+        _fifo_workers_started = True
+
+
+def enqueue_download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_size=False, classify=True,
+                          monitor_filename=''):
+    sn = int(sn)
+    if not _try_claim_download_sn(sn):
+        err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
+        return False
+    ensure_fifo_workers()
+    Config.set_task_waiting(sn, filename=monitor_filename or '')
+    try:
+        download_fifo.put({
+            'type': 'download_only',
+            'kwargs': {
+                'sn': sn,
+                'dl_resolution': dl_resolution,
+                'dl_save_dir': dl_save_dir,
+                'realtime_show_file_size': realtime_show_file_size,
+                'classify': classify,
+            },
+        })
+    except BaseException:
+        _release_download_sn(sn)
+        raise
+    return True
+
+
+def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False):
+    sn = int(sn)
+    if not _try_claim_download_sn(sn):
+        err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
+        return False
+    ensure_fifo_workers()
+    Config.set_task_waiting(sn)
+    try:
+        download_fifo.put({
+            'type': 'worker',
+            'sn': sn,
+            'sn_info': sn_info,
+            'realtime_show_file_size': realtime_show_file_size,
+        })
+    except BaseException:
+        _release_download_sn(sn)
+        raise
+    return True
+
+
+def _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit):
+    if skipped == 0:
+        print('所有下載任務已新增至佇列, 共 ' + str(enqueued) + ' 個任務, 執行緒數: ' + str(cui_thread_limit) + '\n')
+    elif enqueued == 0:
+        print('本次共 ' + str(skipped) + ' 個 SN 皆已在佇列或下載中, 執行緒數: ' + str(cui_thread_limit) + '\n')
+    else:
+        print('佇列更新: 新增 ' + str(enqueued) + ' 個, 略過重複 ' + str(skipped) + ' 個, 執行緒數: ' + str(cui_thread_limit) + '\n')
+
+
 def reset_download_limiter_for_cli(limit):
     """僅命令列單次執行時設定 limiter；該路徑會 sys.exit，不與自動模式共存。"""
     global thread_limiter
@@ -554,7 +679,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         if get_info:
             __get_info_only(sn)
         else:
-            __download_only(sn, cui_resolution, cui_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
+            enqueue_download_only(sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify)
 
     elif cui_download_mode == 'latest' or cui_download_mode == 'largest-sn':
         if cui_download_mode == 'latest':
@@ -581,7 +706,10 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         if get_info:
             __get_info_only(bangumi_list[-1])
         else:
-            __download_only(bangumi_list[-1], cui_resolution, cui_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
+            target_sn = bangumi_list[-1]
+            enqueue_download_only(
+                target_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                monitor_filename=anime.get_monitor_filename_for_sn(target_sn, cui_resolution or None))
 
     elif cui_download_mode == 'all':
         if get_info:
@@ -593,24 +721,30 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         if anime['failed']:
             return
         anime = anime['anime']
+        _update_monitor_after_parse(anime, sn, cui_resolution, '正在解析番劇')
 
         bangumi_list = list(anime.get_episode_list().values())
         bangumi_list.sort()
-        tasks_counter = 0  # 任務計數器
+        enqueued = 0
+        skipped = 0
         for anime_sn in bangumi_list:
             if get_info:
                 task = threading.Thread(target=__get_info_only, args=(anime_sn,))
+                task.daemon = True
+                thread_tasks.append(task)
+                task.start()
+                print('新增查詢佇列: sn=' + str(anime_sn))
+            elif enqueue_download_only(
+                    anime_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                    monitor_filename=anime.get_monitor_filename_for_sn(anime_sn, cui_resolution or None)):
+                enqueued += 1
+                print('新增任務佇列: sn=' + str(anime_sn))
             else:
-                task = threading.Thread(target=__download_only, args=(anime_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify))
-            task.daemon = True
-            thread_tasks.append(task)
-            task.start()
-            tasks_counter = tasks_counter + 1
-            print('新增任務佇列: sn=' + str(anime_sn))
+                skipped += 1
         if get_info:
-            print('所有查詢任務已新增至佇列, 共 '+str(tasks_counter)+' 個任務\n')
+            print('所有查詢任務已新增至佇列, 共 ' + str(len(bangumi_list)) + ' 個任務\n')
         else:
-            print('所有下載任務已新增至佇列, 共 '+str(tasks_counter)+' 個任務, '+'執行緒數: ' + str(cui_thread_limit) + '\n')
+            _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit)
 
     elif cui_download_mode == 'range':
         if get_info:
@@ -625,24 +759,30 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
         episode_dict = anime.get_episode_list()
         bangumi_ep_list = list(episode_dict.keys())  # 本番劇集列表
-        tasks_counter = 0  # 任務計數器
+        enqueued = 0
+        skipped = 0
         for ep in ep_range:
             if ep in bangumi_ep_list:
+                ep_sn = episode_dict[ep]
                 if get_info:
-                    a = threading.Thread(target=__get_info_only, args=(episode_dict[ep],))
+                    a = threading.Thread(target=__get_info_only, args=(ep_sn,))
+                    a.daemon = True
+                    thread_tasks.append(a)
+                    a.start()
+                    print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
+                elif enqueue_download_only(
+                        ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
+                    enqueued += 1
+                    print('新增任務佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
                 else:
-                    a = threading.Thread(target=__download_only, args=(episode_dict[ep], cui_resolution, cui_save_dir, realtime_show_file_size))
-                a.daemon = True
-                thread_tasks.append(a)
-                a.start()
-                tasks_counter = tasks_counter + 1
-                if get_info:
-                    print('新增查詢佇列: sn=' + str(episode_dict[ep]) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
-                else:
-                    print('新增任務佇列: sn='+str(episode_dict[ep])+' 《'+anime.get_bangumi_name()+'》 第 '+ep+' 集')
+                    skipped += 1
             else:
                 err_print(0, '《'+anime.get_bangumi_name()+'》 第 '+ep+' 集不存在!', status=1, no_sn=True)
-        print('所有任務已新增至佇列, 共 '+str(tasks_counter)+' 個任務, '+'執行緒數: ' + str(cui_thread_limit) + '\n')
+        if get_info:
+            print('所有查詢任務已新增至佇列, 共 ' + str(enqueued) + ' 個任務\n')
+        else:
+            _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit)
 
     elif cui_download_mode == 'sn-range':
         if get_info:
@@ -658,24 +798,28 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         # 劇集列表 key value 互換, {'sn', '劇集名'}
         episode_dict = {value:key for key,value in anime.get_episode_list().items()}
         ep_sn_list = list(episode_dict.keys())  # 本番劇集sn列表
-        tasks_counter = 0  # 任務計數器
+        enqueued = 0
+        skipped = 0
         ep_range = list(map(lambda x: int(x), ep_range))
-        for sn in ep_sn_list:
-            if sn in ep_range:
-                # 如果該 sn 在使用者指定的 sn 範圍裡
+        for ep_sn in ep_sn_list:
+            if ep_sn in ep_range:
                 if get_info:
-                    a = threading.Thread(target=__get_info_only, args=(sn,))
+                    a = threading.Thread(target=__get_info_only, args=(ep_sn,))
+                    a.daemon = True
+                    thread_tasks.append(a)
+                    a.start()
+                    print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
+                elif enqueue_download_only(
+                        ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
+                    enqueued += 1
+                    print('新增任務佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
                 else:
-                    a = threading.Thread(target=__download_only, args=(sn, cui_resolution, cui_save_dir, realtime_show_file_size))
-                a.daemon = True
-                thread_tasks.append(a)
-                a.start()
-                tasks_counter = tasks_counter + 1
-                if get_info:
-                    print('新增查詢佇列: sn=' + str(sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[sn] + ' 集')
-                else:
-                    print('新增任務佇列: sn='+str(sn)+' 《'+anime.get_bangumi_name()+'》 第 ' + episode_dict[sn] + ' 集')
-        print('所有任務已新增至佇列, 共 ' + str(tasks_counter) + ' 個任務, ' + '執行緒數: ' + str(cui_thread_limit) + '\n')
+                    skipped += 1
+        if get_info:
+            print('所有查詢任務已新增至佇列, 共 ' + str(enqueued) + ' 個任務\n')
+        else:
+            _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit)
 
     elif cui_download_mode == 'multi':
         if get_info:
@@ -683,18 +827,24 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         else:
             print('當前下載模式: 下載指定sn劇集\n')
 
-        tasks_counter = 0
-        for sn in ep_range:
+        enqueued = 0
+        skipped = 0
+        for multi_sn in ep_range:
             if get_info:
-                a = threading.Thread(target=__get_info_only, args=(sn,))
+                a = threading.Thread(target=__get_info_only, args=(multi_sn,))
+                a.daemon = True
+                thread_tasks.append(a)
+                a.start()
+            elif enqueue_download_only(multi_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify):
+                enqueued += 1
+                print('新增任務佇列: sn=' + str(multi_sn))
             else:
-                a = threading.Thread(target=__download_only,args=(sn, cui_resolution, cui_save_dir, realtime_show_file_size))
-            a.daemon = True
-            thread_tasks.append(a)
-            a.start()
-            tasks_counter = tasks_counter + 1
+                skipped += 1
 
-        print('所有任務已新增至佇列, 共 ' + str(tasks_counter) + ' 個任務, ' + '執行緒數: ' + str(cui_thread_limit) + '\n')
+        if get_info:
+            print('所有查詢任務已新增至佇列, 共 ' + str(len(ep_range)) + ' 個任務\n')
+        else:
+            _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit)
 
     elif cui_download_mode in ('list', 'sn-list'):
         if get_info:
@@ -716,14 +866,13 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 print('當前下載模式: 單次下載sn_list.txt中的番劇\n')
 
             check_tasks()  # 檢查更新，生成任務佇列
+            enqueued = 0
             for sn in queue.keys():  # 遍歷任務佇列
-                processing_queue.append(sn)
-                task = threading.Thread(target=worker, args=(sn, queue[sn], realtime_show_file_size))
-                task.daemon = True
-                thread_tasks.append(task)
-                task.start()
-                err_print(sn, '加入任務佇列')
-            msg = '共 ' + str(len(queue)) + ' 個任務'
+                if enqueue_sn_worker(sn, queue[sn], realtime_show_file_size):
+                    processing_queue.append(sn)
+                    enqueued += 1
+                    err_print(sn, '加入任務佇列')
+            msg = '共 ' + str(enqueued) + ' 個任務'
             err_print(0, '任務資訊', msg, no_sn=True)
             print()
 
@@ -745,6 +894,9 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
 
     if dashboard_worker:
         return
+
+    if not get_info:
+        download_fifo.join()
 
     __kill_thread_when_ctrl_c()
     kill_gost()  # 結束 gost
@@ -905,6 +1057,7 @@ db_path = os.path.join(working_dir, 'aniGamer.db')
 queue = {}  # 儲存 sn 相關資訊, {'tag': TAG, 'rename': RENAME}, rename,
 processing_queue = []
 init_download_limiter()
+ensure_fifo_workers()
 upload_limiter = threading.Semaphore(settings['multi_upload'])  # 並發上傳限制器
 db_locker = threading.Semaphore(1)
 thread_tasks = []
@@ -1089,12 +1242,10 @@ if __name__ == '__main__':
         if queue:
             for task_sn in queue.keys():
                 if task_sn not in processing_queue:  # 如果該任務沒有在進行中，則啟動
-                    task = threading.Thread(target=worker, args=(task_sn, queue[task_sn]))
-                    task.daemon = True
-                    task.start()
-                    processing_queue.append(task_sn)
-                    new_tasks_counter = new_tasks_counter + 1
-                    err_print(task_sn, '加入任務佇列')
+                    if enqueue_sn_worker(task_sn, queue[task_sn]):
+                        processing_queue.append(task_sn)
+                        new_tasks_counter = new_tasks_counter + 1
+                        err_print(task_sn, '加入任務佇列')
         info = '本次更新新增了 '+str(new_tasks_counter)+' 個新任務, 目前佇列中共有 ' + str(len(processing_queue)) + ' 個任務'
         err_print(0, '更新資訊', info, no_sn=True)
         err_print(0, '更新結束', no_sn=True)

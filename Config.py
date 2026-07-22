@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.10'
+aniGamerPlus_version = 'v24.9.11'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
@@ -32,6 +32,10 @@ cookie_mtime_at_load = None
 _cookie_reload_suppress_notice = False
 _cookie_load_lock = threading.RLock()
 _login_status_reporting = False
+_login_refresh_lock = threading.Lock()
+_login_refresh_pending = False
+_login_refresh_last_attempt = 0.0
+LOGIN_STATUS_REFRESH_COOLDOWN = 10
 login_status_cache = {'state': 'unknown', 'label': '', 'detail': ''}
 login_status_probe_mtime = None
 LOGIN_PROBE_SN = 878
@@ -42,25 +46,51 @@ tasks_progress_rate = {}  # 儲存任務進度, 供面板使用,
 # 格式: {sn: {'rate': 任務進度百分比(float), 'status': 任務狀態, 'filename': 檔名} }
 # 任務狀態有:  '正在下載' '正在解密合併' '正在移至番劇目錄' '任務失敗, 等待重啟' '等待下載'
 tasks_progress_lock = threading.Lock()
+tasks_progress_snapshot = {}
+_task_monitor_rate_throttle = {}
+
+
+def _copy_tasks_progress(src):
+    return {k: dict(v) for k, v in src.items()}
+
+
+def format_task_monitor_filename(sn, display_name=''):
+    """監控卡片標題：SN=123456 檔名（中間一空格）。"""
+    sn = int(sn)
+    name = (display_name or '').strip()
+    if re.match(r'(?i)^SN=\d+\s', name):
+        return name
+    name = re.sub(r'(?i)^sn=\d+\s*', '', name).strip()
+    if name:
+        return 'SN=' + str(sn) + ' ' + name
+    return 'SN=' + str(sn)
 
 
 def update_task_monitor(sn, rate=None, status=None, filename=None):
     sn = int(sn)
+    if rate is not None and status is None and not filename:
+        now = time.monotonic()
+        prev = _task_monitor_rate_throttle.get(sn)
+        if prev is not None and now - prev[0] < 1.0 and abs(rate - prev[1]) < 1.0:
+            return
+        _task_monitor_rate_throttle[sn] = (now, rate)
+    if status is not None or filename:
+        _task_monitor_rate_throttle.pop(sn, None)
     with tasks_progress_lock:
         entry = tasks_progress_rate.get(sn)
         if entry is None:
-            entry = {'rate': 0, 'status': '等待下載', 'filename': 'sn=' + str(sn)}
+            entry = {'rate': 0, 'status': '等待下載', 'filename': format_task_monitor_filename(sn, '')}
             tasks_progress_rate[sn] = entry
         if rate is not None:
             entry['rate'] = rate
         if status is not None:
             entry['status'] = status
         if filename:
-            entry['filename'] = filename
+            entry['filename'] = format_task_monitor_filename(sn, filename)
 
 
 def set_task_waiting(sn, filename=''):
-    update_task_monitor(sn, rate=0, status='等待下載', filename=filename or ('sn=' + str(sn)))
+    update_task_monitor(sn, rate=0, status='等待下載', filename=filename)
 
 
 def set_task_failed(sn, status='任務失敗'):
@@ -72,8 +102,14 @@ def set_task_completed(sn, filename=''):
 
 
 def get_tasks_progress_rate():
-    with tasks_progress_lock:
-        return dict(tasks_progress_rate)
+    global tasks_progress_snapshot
+    if tasks_progress_lock.acquire(blocking=False):
+        try:
+            tasks_progress_snapshot = _copy_tasks_progress(tasks_progress_rate)
+            return dict(tasks_progress_snapshot)
+        finally:
+            tasks_progress_lock.release()
+    return dict(tasks_progress_snapshot)
 
 
 def __color_print(sn, err_msg, detail='', status=0, no_sn=False, display=True):
@@ -115,7 +151,7 @@ def get_config_path():
 def get_sn_list_content():
     # 傳回 sn_list 的所有內容（含註解），提供給 Web 控制面板使用
     if not os.path.exists(sn_list_path):
-        return ""
+        _ensure_sn_list_file(log=False)
     with open(sn_list_path, 'r', encoding='utf-8') as f:
         return f.read()
 
@@ -695,15 +731,24 @@ def check_encoding(file_path):
             __color_print(0, '檔案讀取', file_path + ' 轉碼成功', no_sn=True, status=2)
 
 
+def _ensure_sn_list_file(log=False):
+    if os.path.exists(sn_list_path):
+        return
+    try:
+        with open(sn_list_path, 'w', encoding='utf-8') as f:
+            pass
+        if log:
+            __color_print(0, '', detail='已建立 sn_list.txt，請填入要自動追蹤的 SN', status=0, no_sn=True)
+    except BaseException as e:
+        if log:
+            __color_print(0, '無法建立 sn_list.txt: ' + str(e), status=1, no_sn=True)
+
+
 def read_sn_list():
     settings = read_settings()
 
-    # 防呆 https://github.com/miyouzi/aniGamerPlus/issues/5
-    error_sn_list_path = sn_list_path.replace('sn_list.txt', 'sn_list.txt.txt')
-    if os.path.exists(error_sn_list_path):
-        os.rename(error_sn_list_path, sn_list_path)
-
     if not os.path.exists(sn_list_path):
+        _ensure_sn_list_file(log=False)
         return {}
 
     if not os.path.getsize(sn_list_path):
@@ -806,14 +851,7 @@ def _disk_cookie_is_empty(cookies):
 
 
 def _load_cookie_from_disk(log=False):
-    # 若存在 cookies.txt 或 cookie.txt.txt 則重新命名為 cookie.txt
     try:
-        old_cookie_path = cookie_path.replace('cookie.txt', 'cookies.txt')
-        if os.path.exists(old_cookie_path):
-            os.rename(old_cookie_path, cookie_path)
-        error_cookie_path = cookie_path.replace('cookie.txt', 'cookie.txt.txt')
-        if os.path.exists(error_cookie_path):
-            os.rename(error_cookie_path, cookie_path)
         if os.path.exists(cookie_path):
             if os.path.getsize(cookie_path) == 0:
                 return None
@@ -916,9 +954,6 @@ def probe_bahamut_login(sn=None):
             err = data['error']
             return 'error', 'code=' + str(err.get('code', '')) + ' ' + str(err.get('message', '')).strip()
         if data.get('vip'):
-            nick = login_cookies.get('BAHANICK') or login_cookies.get('BAHAID') or ''
-            if nick:
-                return 'vip', '已登入 VIP（' + str(nick) + '）'
             return 'vip', '已登入 VIP 帳戶'
         return 'login', '非 VIP 帳戶'
     except BaseException as e:
@@ -927,6 +962,37 @@ def probe_bahamut_login(sn=None):
 
 def _login_status_label(state):
     return {'guest': '遊客', 'vip': 'VIP', 'login': '已登入', 'error': '異常'}.get(state, state)
+
+
+def _login_status_stale():
+    try:
+        disk_mtime = _cookie_disk_mtime()
+    except BaseException:
+        return True
+    return login_status_cache.get('state') == 'unknown' or login_status_probe_mtime != disk_mtime
+
+
+def _refresh_login_status_async(log=False):
+    """在背景執行緒探測登入，避免阻塞 gevent Web 伺服器。"""
+    global _login_refresh_pending, _login_refresh_last_attempt
+    now = time.time()
+    with _login_refresh_lock:
+        if _login_refresh_pending or _login_status_reporting:
+            return
+        if now - _login_refresh_last_attempt < LOGIN_STATUS_REFRESH_COOLDOWN:
+            return
+        _login_refresh_pending = True
+        _login_refresh_last_attempt = now
+
+    def _run():
+        global _login_refresh_pending
+        try:
+            report_login_status(log=log)
+        finally:
+            with _login_refresh_lock:
+                _login_refresh_pending = False
+
+    threading.Thread(target=_run, daemon=True, name='login-status-refresh').start()
 
 
 def report_login_status(sn=None, log=True):
@@ -941,30 +1007,31 @@ def report_login_status(sn=None, log=True):
         login_status_probe_mtime = _cookie_disk_mtime()
         if not log:
             return login_status_cache
-        summary = label + '，' + detail
+        summary = '登入狀態：' + label
         if state in ('vip', 'login'):
-            __color_print(0, '登入狀態', detail=summary, status=2, no_sn=True)
+            __color_print(0, '', detail=summary, status=2, no_sn=True)
         elif state in ('guest', 'error'):
-            __color_print(0, '登入狀態', detail=summary, status=1, no_sn=True)
+            __color_print(0, '', detail=summary, status=1, no_sn=True)
         else:
-            __color_print(0, '登入狀態', detail=summary, status=0, no_sn=True)
+            __color_print(0, '', detail=summary, status=0, no_sn=True)
         return login_status_cache
     except BaseException as e:
         login_status_cache = {'state': 'error', 'label': '異常', 'detail': '登入檢查失敗: ' + str(e)}
         login_status_probe_mtime = _cookie_disk_mtime()
         if log:
-            __color_print(0, '登入狀態', detail='異常，' + login_status_cache['detail'], status=1, no_sn=True)
+            __color_print(0, '', detail='登入狀態：異常', status=1, no_sn=True)
         return login_status_cache
     finally:
         _login_status_reporting = False
 
 
 def get_login_status(for_dashboard=False):
-    global login_status_probe_mtime
     try:
-        disk_mtime = _cookie_disk_mtime()
-        if login_status_cache.get('state') == 'unknown' or login_status_probe_mtime != disk_mtime:
-            report_login_status(log=not for_dashboard)
+        if _login_status_stale():
+            if for_dashboard:
+                _refresh_login_status_async(log=False)
+            else:
+                report_login_status(log=True)
     except BaseException as e:
         login_status_cache.update({'state': 'error', 'label': '異常', 'detail': '讀取 cookie 失敗: ' + str(e)})
     return dict(login_status_cache)
@@ -972,6 +1039,7 @@ def get_login_status(for_dashboard=False):
 
 def startup_cookie_check():
     read_cookie(log=True)
+    _ensure_sn_list_file(log=True)
     report_login_status()
 
 
@@ -1030,7 +1098,7 @@ def renew_cookies(new_cookie, log=True):
                 __color_print(0, '新cookie儲存成功', no_sn=True, display=False)
             _cookie_reload_suppress_notice = True
             read_cookie(log=False)
-            report_login_status(log=False)
+            _refresh_login_status_async(log=False)
             break
 
 

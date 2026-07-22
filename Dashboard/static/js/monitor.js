@@ -119,12 +119,10 @@
 			.done(function (token) {
 				tasksProgressUrl += token;
 				ws = new WebSocket(tasksProgressUrl);
-				socketConnecting = false;
 
 				ws.onopen = function () {
-					if (!socketSilent) {
-						hideMonitorLoading();
-					}
+					socketConnecting = false;
+					hideMonitorLoading();
 				};
 
 				ws.onmessage = function (evt) {
@@ -133,6 +131,7 @@
 						scheduleReconnect();
 						return;
 					}
+					hideMonitorLoading();
 					var parts = extractTasksAndLogin(payload);
 					if (parts.login && window.applyLoginStatusBadge) {
 						window.applyLoginStatusBadge(parts.login);

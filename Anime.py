@@ -138,6 +138,22 @@ class Anime:
         else:
             return self.__get_filename(str(self.video_resolution))
 
+    def get_monitor_filename_for_sn(self, listed_sn, resolution=None):
+        """與下載完成檔名相同規則，供監控中心顯示（含尚未開始下載的集）。"""
+        listed_sn = int(listed_sn)
+        res = str(resolution if resolution else self._settings['download_resolution'])
+        if listed_sn == int(self._sn):
+            return self.__get_filename(res)
+        for ep, ep_sn in self.get_episode_list().items():
+            if int(ep_sn) == listed_sn:
+                saved_sn, saved_ep = self._sn, self._episode
+                self._sn, self._episode = listed_sn, str(ep)
+                try:
+                    return self.__get_filename(res)
+                finally:
+                    self._sn, self._episode = saved_sn, saved_ep
+        return 'sn=' + str(listed_sn)
+
     def __warmup_session(self):
         if self._session_warmed_up:
             return
@@ -1009,7 +1025,7 @@ class Anime:
             self._bangumi_name = self._bangumi_name.replace(bangumi_name, rename)
 
         # 下載任務開始
-        Config.update_task_monitor(self._sn, rate=0, status='正在解析', filename='《'+self.get_title()+'》')
+        Config.update_task_monitor(self._sn, rate=0, status='正在解析', filename=self.get_filename())
 
         try:
             self.__get_m3u8_dict()  # 取得 m3u8 列表

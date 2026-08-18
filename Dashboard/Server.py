@@ -5,14 +5,14 @@
 # @File    : Server.py
 # @Software: PyCharm
 
-# 非阻塞
+# 非阻塞（手動任務佇列須用 stdlib queue，不可在 patch 後 import，否則與 threading worker 互卡）
+import queue as _stdlib_queue
 from gevent import monkey; monkey.patch_all()
 from gevent import sleep as gevent_sleep, spawn
 
 import json, sys, os, re, time
 import threading, traceback
 import random, string
-from queue import Queue, Full
 
 from aniGamerPlus import Config
 from flask import Flask, request, jsonify
@@ -52,7 +52,14 @@ logger.propagate = False  # 不在控制面板上輸出
 # websocket鑑權需要的 token, 隨機一個 32 位初始 token
 websocket_token = ''.join(random.sample(string.ascii_letters + string.digits, 32))
 
-_manual_task_queue = Queue(maxsize=32)
+_manual_task_queue = _stdlib_queue.Queue(maxsize=32)
+
+
+def _manual_task_enqueue(raw):
+    try:
+        _manual_task_queue.put_nowait(raw)
+    except _stdlib_queue.Full:
+        err_print(0, 'Dashboard', '手動任務佇列已滿', no_sn=True, status=1)
 
 
 def _process_manual_task_raw(raw):
@@ -90,12 +97,21 @@ def _process_manual_task_raw(raw):
 def _manual_task_worker():
     while True:
         raw = _manual_task_queue.get()
-        try:
-            _process_manual_task_raw(raw)
-        except BaseException:
-            logger.exception('手動任務處理失敗')
-        finally:
-            _manual_task_queue.task_done()
+        job = threading.Thread(
+            target=_process_manual_task_job,
+            args=(raw,),
+            daemon=True,
+            name='manual-task-job')
+        job.start()
+
+
+def _process_manual_task_job(raw):
+    try:
+        _process_manual_task_raw(raw)
+    except BaseException:
+        logger.exception('手動任務處理失敗')
+    finally:
+        _manual_task_queue.task_done()
 
 
 threading.Thread(target=_manual_task_worker, daemon=True, name='dashboard-manual-dispatcher').start()
@@ -169,17 +185,28 @@ def recv_config():
     for id in id_list:
         new_settings[id] = data[id]  # 更新配置
     Config.write_settings(new_settings)  # 儲存配置
+    _apply_runtime_config_after_save(new_settings)
     err_print(0, 'Dashboard', '透過 Web 控制面板更新了 config.json', no_sn=True, status=2)
     return '{"status":"200"}'
+
+
+def _apply_runtime_config_after_save(new_settings):
+    import sys
+    for mod_name in ('__main__', 'aniGamerPlus'):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, 'apply_runtime_settings'):
+            mod.apply_runtime_settings(new_settings)
+            return
 
 
 @app.route('/manualTask', methods=['POST'])
 def manual_task():
     raw = request.get_data(as_text=True)
-    try:
-        _manual_task_queue.put_nowait(raw)
-    except Full:
-        return jsonify({'status': '503', 'error': '手動任務佇列已滿，請稍後再試'}), 503
+    threading.Thread(
+        target=_manual_task_enqueue,
+        args=(raw,),
+        daemon=True,
+        name='manual-task-enqueue').start()
     return jsonify({'status': '200'})
 
 

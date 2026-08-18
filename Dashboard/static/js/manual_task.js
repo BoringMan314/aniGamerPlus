@@ -19,19 +19,6 @@ function initManualTaskModal() {
 	});
 }
 
-function setManualSubmitBusy(busy) {
-	var $btn = $('#manual_submit_btn');
-	if (!$btn.length) {
-		return;
-	}
-	if (busy) {
-		$btn.prop('disabled', true).data('orig-text', $btn.text()).text('提交中…');
-	} else {
-		var orig = $btn.data('orig-text') || '提交';
-		$btn.prop('disabled', false).text(orig);
-	}
-}
-
 function flashManualSubmitOk() {
 	var $btn = $('#manual_submit_btn');
 	if (!$btn.length) {
@@ -42,7 +29,7 @@ function flashManualSubmitOk() {
 		if ($('#manualTasks').hasClass('show')) {
 			$btn.text('提交');
 		}
-	}, 1200);
+	}, 3000);
 }
 
 function readManualConfig() {
@@ -60,42 +47,27 @@ function readManualConfig() {
 	manualData['thread'] = $('#manual_thread_limit').val();
 	manualData['danmu'] = $('#manual_danmu').is(':checked');
 
-	setManualSubmitBusy(true);
+	// 樂觀提交：不等待伺服器，不入隊提示彈窗
+	$('#manual_link').val('').focus();
+	flashManualSubmitOk();
+	if (window.refreshTaskMonitor) {
+		window.refreshTaskMonitor();
+	}
 
 	$.ajax({
 		url: '/manualTask',
 		type: 'post',
 		dataType: 'json',
-		timeout: 8000,
+		timeout: 0,
 		headers: {
 			'Content-Type': 'application/json;charset=utf-8'
 		},
 		contentType: 'application/json; charset=utf-8',
 		data: JSON.stringify(manualData),
-		success: function(data) {
-			$('#manual_link').val('').focus();
-			flashManualSubmitOk();
+		success: function() {
 			if (window.refreshTaskMonitor) {
 				window.refreshTaskMonitor();
 			}
-		},
-		error: function(xhr) {
-			setManualSubmitBusy(false);
-			resetUploadStatusModal();
-			var msg = '任務提交失敗';
-			if (xhr && xhr.status === 503) {
-				msg = '手動任務佇列已滿，請稍後再試';
-			} else if (xhr && xhr.statusText === 'timeout') {
-				msg = '伺服器回應逾時，任務可能已入隊，請看監控或 log';
-			}
-			$('#uploadFailed .upload-status').text(msg);
-			$('#uploadFailed').show();
-			$('#uploadStatus').off('hidden.bs.modal.uploadStatusChain');
-			$('#uploadStatus').one('hidden.bs.modal.uploadStatusChain', function() {
-				$('#uploadFailed .upload-status').text('配置提交失敗');
-				$('#manualTasks').modal('show');
-			});
-			$('#uploadStatus').modal('show');
 		}
 	});
 }

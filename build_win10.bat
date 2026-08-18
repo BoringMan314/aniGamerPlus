@@ -3,7 +3,7 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "EXE_OUT=aniGamerPlus.exe"
-set "RELEASE_VERSION=v24.9.12"
+set "RELEASE_VERSION=v24.9.13"
 set "ZIP_NAME=aniGamerPlus_%RELEASE_VERSION%_windows_64bit.zip"
 set "PIPY="
 
@@ -100,7 +100,7 @@ goto :end_ok
 
 :find_python
 set "PIPY="
-for %%V in (3.8 3.9 3.10 3.11 3.12 3.13 3.14) do (
+for %%V in (3.11 3.10 3.9 3.8) do (
   where py >nul 2>&1
   if not errorlevel 1 (
     py -%%V -c "import sys; assert sys.version_info>=(3,8)" 2>nul

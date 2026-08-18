@@ -223,125 +223,186 @@ def update_db(anime):
     db_locker.release()
 
 
-def worker(sn, sn_info, realtime_show_file_size=False):
+def _pipeline_fail(job, msg=None):
+    sn = job['sn']
+    Config.set_task_failed(sn)
+    if msg:
+        err_print(sn, '任務失敗', msg, status=1)
+    if job['type'] == 'worker':
+        queue.pop(sn, None)
+        if sn in processing_queue:
+            processing_queue.remove(sn)
+    _release_download_sn(sn)
+
+
+def _pipeline_success(job):
+    sn = job['sn']
+    anime = job['anime']
+
+    if job['type'] == 'worker':
+        update_db(anime)
+        if settings['upload_to_server']:
+            upload_limiter.acquire()
+            try:
+                if not anime.upload(job['sn_info']['tag']):
+                    err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.', status=1)
+                else:
+                    update_db(anime)
+            except BaseException as e:
+                err_print(sn, '上傳異常', '發生未知錯誤: ' + str(e), status=1)
+                err_print(sn, '上傳異常', traceback.format_exc(), status=1, display=False)
+            finally:
+                upload_limiter.release()
+
+    download_cd = threading.Thread(target=download_cd_counter, kwargs={'release_limiter': False})
+    download_cd.start()
+    download_cd.join()
+
+    if job['type'] == 'worker':
+        queue.pop(sn, None)
+        if sn in processing_queue:
+            processing_queue.remove(sn)
+
+    err_print(sn, '任務完成', status=2)
+    _release_download_sn(sn)
+
+
+def _try_worker_upload_only(job):
+    sn = job['sn']
+    sn_info = job['sn_info']
     bangumi_tag = sn_info['tag']
-    rename = sn_info['rename']
 
     def upload_quit():
-        queue.pop(sn)
-        processing_queue.remove(sn)
-        upload_limiter.release()  # 並發上傳限制器
-        return
+        queue.pop(sn, None)
+        if sn in processing_queue:
+            processing_queue.remove(sn)
+        upload_limiter.release()
 
     anime_in_db = read_db(sn)
-    # 如果使用者設定要上傳且已經下載好了但還沒有上傳成功, 那麼僅上傳
-    if settings['upload_to_server'] and anime_in_db['status'] == 1 and anime_in_db['remote_status'] == 0:
-        upload_limiter.acquire()  # 並發上傳限制器
-        anime = build_anime(sn)
-        if anime['failed']:
-            err_print(sn, '任務失敗', '從任務佇列中移除, 等待下次更新重試.', status=1)
-            upload_quit()
+    if not (settings['upload_to_server'] and anime_in_db['status'] == 1 and anime_in_db['remote_status'] == 0):
+        return False
 
-        # 影片資訊抓取成功
-        anime = anime['anime']
-        if not os.path.exists(anime_in_db['local_file_path']):
-            # 如果資料庫中記錄的檔案路徑已失效
-            update_db(anime)
-            err_msg_detail = 'title=\"' + anime.get_title() + '\" 本地檔案丟失, 從任務佇列中移除, 等待下次更新重試.'
-            err_print(sn, '上傳失敗', err_msg_detail, status=1)
-            upload_quit()
-
-        anime.local_video_path = anime_in_db['local_file_path']  # 告知檔案位置
-        anime.video_size = anime_in_db['file_size']  # 透過 update_db() 下載狀態檢查
-        anime.video_resolution = anime_in_db['resolution']  # 避免更新時把解析度變成0
-
-        try:
-            if not anime.upload(bangumi_tag):  # 如果上傳失敗
-                err_msg_detail = 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.'
-                err_print(sn, '上傳失敗', err_msg_detail, 1)
-            else:
-                update_db(anime)
-                err_print(sn, '任務完成', status=2)
-        except BaseException as e:
-            err_msg_detail = 'title=\"' + anime.get_title() + '\" 發生未知錯誤, 等待下次更新重試: ' + str(e)
-            err_print(sn, '上傳失敗', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
-            err_print(sn, '上傳失敗', err_msg_detail, 1)
-
-        upload_quit()
-
-    # =====下載模組 =====
-    Config.set_task_waiting(sn)
-    thread_limiter.acquire()  # 並發下載限制器
+    upload_limiter.acquire()
     anime = build_anime(sn)
-
     if anime['failed']:
-        queue.pop(sn)
-        processing_queue.remove(sn)
-        thread_limiter.release()
-        Config.set_task_failed(sn)
         err_print(sn, '任務失敗', '從任務佇列中移除, 等待下次更新重試.', status=1)
-        return
+        upload_quit()
+        _release_download_sn(sn)
+        return True
 
     anime = anime['anime']
-    _update_monitor_after_parse(anime, sn, settings['download_resolution'], '正在解析')
+    if not os.path.exists(anime_in_db['local_file_path']):
+        update_db(anime)
+        err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 本地檔案丟失, 從任務佇列中移除, 等待下次更新重試.', status=1)
+        upload_quit()
+        _release_download_sn(sn)
+        return True
 
+    anime.local_video_path = anime_in_db['local_file_path']
+    anime.video_size = anime_in_db['file_size']
+    anime.video_resolution = anime_in_db['resolution']
     try:
-        anime.download(settings['download_resolution'], bangumi_tag=bangumi_tag, rename=rename,
-                       realtime_show_file_size=realtime_show_file_size, classify=settings['classify_bangumi'])
-    except NonRetryableDownloadError as e:
-        queue.pop(sn)
-        processing_queue.remove(sn)
-        thread_limiter.release()
-        Config.set_task_failed(sn)
-        err_print(sn, '任務失敗', str(e), status=1)
-        return
+        if not anime.upload(bangumi_tag):
+            err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.', status=1)
+        else:
+            update_db(anime)
+            err_print(sn, '任務完成', status=2)
     except BaseException as e:
-        # 兜一下各種奇奇怪怪的錯誤
-        err_print(sn, '下載異常', '發生未知錯誤: '+str(e), status=1)
-        err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
+        err_print(sn, '上傳失敗', '異常詳情:\n' + traceback.format_exc(), status=1, display=False)
+        err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 發生未知錯誤, 等待下次更新重試: ' + str(e), status=1)
+
+    upload_quit()
+    _release_download_sn(sn)
+    return True
+
+
+def _call_anime_download(anime, job, merge_after):
+    if job['type'] == 'download_only':
+        dl_resolution = job.get('dl_resolution') or ''
+        dl_save_dir = job.get('dl_save_dir') or ''
+        classify = job.get('classify', True)
+        realtime = job.get('realtime_show_file_size', False)
+        if dl_resolution:
+            anime.download(dl_resolution, dl_save_dir, realtime_show_file_size=realtime,
+                           classify=classify, merge_after=merge_after)
+        else:
+            anime.download(settings['download_resolution'], dl_save_dir,
+                           realtime_show_file_size=realtime, classify=classify, merge_after=merge_after)
+        job['effective_resolution'] = dl_resolution or settings['download_resolution']
+    else:
+        sn_info = job['sn_info']
+        anime.download(settings['download_resolution'], bangumi_tag=sn_info['tag'], rename=sn_info['rename'],
+                       realtime_show_file_size=job.get('realtime_show_file_size', False),
+                       classify=settings['classify_bangumi'], merge_after=merge_after)
+        job['effective_resolution'] = settings['download_resolution']
+
+
+def _pipeline_download_once(job, merge_after):
+    anime = job['anime']
+    sn = job['sn']
+    thread_limiter.acquire()
+    try:
+        _call_anime_download(anime, job, merge_after=merge_after)
+    except NonRetryableDownloadError as e:
+        err_print(sn, '任務失敗', str(e), status=1)
+        return 'fatal'
+    except BaseException as e:
+        err_print(sn, '下載異常', '發生未知異常: ' + str(e), status=1)
+        err_print(sn, '下載異常', '異常詳情:\n' + traceback.format_exc(), status=1, display=False)
         anime.video_size = 0
-
-    if anime.video_size < 5:
-        # 下載失敗
-        queue.pop(sn)
-        processing_queue.remove(sn)
+    finally:
         thread_limiter.release()
-        err_msg_detail = 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.'
-        err_print(sn, '任務失敗', err_msg_detail, status=1)
-        Config.set_task_failed(sn)
-        return
 
-    update_db(anime)  # 下載完成後, 更新資料庫
-    download_cd = threading.Thread(target=download_cd_counter)
-    download_cd.start()
-    # =====下載模組結束 =====
+    if settings['segment_download_mode'] and anime._pending_segment_merge:
+        merge_fifo.put(job)
+        return 'merge'
 
-    # =====上傳模組=====
-    if settings['upload_to_server']:
-        upload_limiter.acquire()  # 並發上傳限制器
+    if anime.video_size >= 5:
+        return 'done'
+    return 'retry'
 
-        try:
-            anime.upload(bangumi_tag)  # 上傳至伺服器
-        except BaseException as e:
-            # 兜一下各種奇奇怪怪的錯誤
-            err_print(sn, '上傳異常', '發生未知錯誤, 從任務佇列中移除, 等待下次更新重試: ' + str(e), status=1)
-            err_print(sn, '上傳異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
-            upload_quit()
 
-        update_db(anime)  # 上傳完成後, 更新資料庫
-        upload_limiter.release()  # 並發上傳限制器
-    # =====上傳模組結束=====
+def _pipeline_run_download(job):
+    err_counter = job.get('err_counter', 0)
+    merge_after = not settings['segment_download_mode']
 
-    download_cd.join()
-    queue.pop(sn)  # 從任務佇列中移除
-    processing_queue.remove(sn)  # 從當前任務佇列中移除 
-    err_print(sn, '任務完成', status=2)
-    
+    while True:
+        result = _pipeline_download_once(job, merge_after=merge_after)
+        if result == 'merge':
+            return
+        if result == 'fatal':
+            _pipeline_fail(job)
+            return
+        if result == 'done':
+            anime = job['anime']
+            resolution = str(job.get('effective_resolution') or settings['download_resolution'])
+            anime.finish_download(resolution)
+            _pipeline_success(job)
+            return
+
+        if err_counter >= 3:
+            anime = job['anime']
+            err_print(job['sn'], '終止任務', 'title=' + anime.get_title() + ' 任務失敗達三次! 終止任務!', status=1)
+            _pipeline_fail(job)
+            return
+
+        err_counter += 1
+        job['err_counter'] = err_counter
+        anime = job['anime']
+        err_print(job['sn'], '任務失敗', 'title=' + anime.get_title() + ' 10s後自動重啟,最多重試三次', status=1)
+        Config.update_task_monitor(job['sn'], status='失敗! 重啟中')
+        time.sleep(10)
+        anime.renew()
+
 
 def download_cd_counter(release_limiter=True):
     seconds = settings['download_cd']
-    while(seconds > 0):
-        err_print('', '下載冷卻:', '下載冷卻時間剩餘 ' + str(seconds) + ' 秒', status=0, no_sn=True)
+    last_log_at = 0.0
+    while seconds > 0:
+        now = time.monotonic()
+        if now - last_log_at >= 25:
+            err_print('', '下載冷卻:', '下載冷卻時間剩餘 ' + str(seconds) + ' 秒', status=0, no_sn=True)
+            last_log_at = now
         wait_time = min(30, seconds)
         time.sleep(wait_time)
         seconds -= wait_time
@@ -415,69 +476,6 @@ def check_tasks():
         # if settings['parse_sn_cd'] > 0:
         #     err_print("更新資訊", "SN 解析冷卻 " + str(settings['parse_sn_cd']) + " 秒", no_sn=True)
         #     time.sleep(settings['parse_sn_cd'])
-
-
-def __download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_size=False, classify=True):
-    # 僅下載,不運算元據庫
-    Config.set_task_waiting(sn)
-    thread_limiter.acquire()
-    err_counter = 0
-
-    anime = build_anime(sn)
-    if anime['failed']:
-        Config.set_task_failed(sn)
-        thread_limiter.release()
-        return
-    anime = anime['anime']
-    _update_monitor_after_parse(anime, sn, dl_resolution, '正在解析')
-
-    try:
-        if dl_resolution:
-            anime.download(dl_resolution, dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
-        else:
-            anime.download(settings['download_resolution'], dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
-    except NonRetryableDownloadError as e:
-        err_print(sn, '任務失敗', str(e), status=1)
-        Config.set_task_failed(sn)
-        thread_limiter.release()
-        return
-    except BaseException as e:
-        err_print(sn, '下載異常', '發生未知異常: ' + str(e), status=1)
-        err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
-        anime.video_size = 0
-
-    while anime.video_size < 5:
-        if err_counter >= 3:
-            err_print(sn, '終止任務', 'title=' + anime.get_title()+' 任務失敗達三次! 終止任務!', status=1)
-            thread_limiter.release()
-            Config.set_task_failed(sn)
-            return
-        else:
-            err_print(sn, '任務失敗', 'title=' + anime.get_title() + ' 10s後自動重啟,最多重試三次', status=1)
-            err_counter = err_counter + 1
-            Config.update_task_monitor(sn, status='失敗! 重啟中')
-            time.sleep(10)
-            anime.renew()
-
-            try:
-                if dl_resolution:
-                    anime.download(dl_resolution, dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
-                else:
-                    anime.download(settings['download_resolution'], dl_save_dir, realtime_show_file_size=realtime_show_file_size, classify=classify)
-            except NonRetryableDownloadError as e:
-                err_print(sn, '任務失敗', str(e), status=1)
-                Config.set_task_failed(sn)
-                thread_limiter.release()
-                return
-            except BaseException as e:
-                err_print(sn, '下載異常', '發生未知異常: ' + str(e), status=1)
-                err_print(sn, '下載異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
-                anime.video_size = 0
-
-    download_cd = threading.Thread(target=download_cd_counter)
-    download_cd.start()
-    download_cd.join()
-    err_print(sn, '任務完成', status=2)
 
 
 def __get_info_only(sn):
@@ -575,11 +573,37 @@ def init_download_limiter(limit=None):
     apply_download_limiter(limit)
 
 
+def apply_runtime_settings(saved_settings=None):
+    """Dashboard 儲存 config 後立即套用（multi-thread、danmu 等記憶體設定）。"""
+    global settings, danmu
+    settings = saved_settings if saved_settings is not None else Config.read_settings()
+    apply_download_limiter(settings['multi-thread'])
+    apply_merge_limiter(settings['multi-thread'])
+    danmu = settings['danmu']
+
+
+ingress_fifo = Queue()
 download_fifo = Queue()
-_fifo_workers_lock = threading.Lock()
-_fifo_workers_started = False
+merge_fifo = Queue()
+_pipeline_workers_lock = threading.Lock()
+_pipeline_workers_started = False
+merge_limiter = None
 _download_sn_active = set()
 _download_sn_active_lock = threading.Lock()
+
+
+def apply_merge_limiter(limit):
+    global merge_limiter
+    if merge_limiter is None:
+        merge_limiter = _DownloadSlotLimiter(limit)
+    else:
+        merge_limiter.set_limit(limit)
+
+
+def init_merge_limiter(limit=None):
+    if limit is None:
+        limit = settings['multi-thread']
+    apply_merge_limiter(limit)
 
 
 def _try_claim_download_sn(sn):
@@ -596,39 +620,99 @@ def _release_download_sn(sn):
         _download_sn_active.discard(int(sn))
 
 
-def _fifo_worker_main():
+def _ingress_worker_main():
+    while True:
+        job = ingress_fifo.get()
+        try:
+            if job['type'] == 'get_info_only':
+                __get_info_only(job['sn'])
+                continue
+
+            sn = job['sn']
+            if job['type'] == 'worker' and _try_worker_upload_only(job):
+                continue
+
+            anime = build_anime(sn)
+            if anime['failed']:
+                _pipeline_fail(job, '從任務佇列中移除, 等待下次更新重試.')
+                continue
+
+            job['anime'] = anime['anime']
+            resolution = job.get('dl_resolution') or settings['download_resolution']
+            _update_monitor_after_parse(job['anime'], sn, resolution, '正在解析')
+            download_fifo.put(job)
+        except BaseException as e:
+            err_print(job.get('sn', 0), '解析佇列', str(e), status=1, no_sn=not job.get('sn'))
+            err_print(0, '解析佇列', traceback.format_exc(), status=1, no_sn=True, display=False)
+            _pipeline_fail(job)
+        finally:
+            ingress_fifo.task_done()
+
+
+def _download_worker_main():
     while True:
         job = download_fifo.get()
-        release_sn = None
         try:
-            job_type = job['type']
-            if job_type == 'download_only':
-                release_sn = int(job['kwargs']['sn'])
-                __download_only(**job['kwargs'])
-            elif job_type == 'worker':
-                release_sn = int(job['sn'])
-                worker(job['sn'], job['sn_info'], job.get('realtime_show_file_size', False))
-            elif job_type == 'get_info_only':
-                __get_info_only(job['sn'])
+            _pipeline_run_download(job)
         except BaseException as e:
-            err_print(0, '下載佇列', '任務執行異常: ' + str(e), status=1, no_sn=True)
+            err_print(job.get('sn', 0), '下載佇列', str(e), status=1, no_sn=not job.get('sn'))
             err_print(0, '下載佇列', traceback.format_exc(), status=1, no_sn=True, display=False)
+            _pipeline_fail(job)
         finally:
-            if release_sn is not None:
-                _release_download_sn(release_sn)
             download_fifo.task_done()
 
 
-def ensure_fifo_workers():
-    global _fifo_workers_started
-    with _fifo_workers_lock:
-        if _fifo_workers_started:
+def _merge_worker_main():
+    while True:
+        job = merge_fifo.get()
+        try:
+            anime = job['anime']
+            merge_limiter.acquire()
+            try:
+                if not anime.merge_pending_segment():
+                    _pipeline_fail(job, '解密合併失敗')
+                    continue
+                resolution = str(job.get('effective_resolution') or settings['download_resolution'])
+                anime.finish_download(resolution)
+            finally:
+                merge_limiter.release()
+            _pipeline_success(job)
+        except BaseException as e:
+            err_print(job.get('sn', 0), '合併佇列', str(e), status=1, no_sn=not job.get('sn'))
+            err_print(0, '合併佇列', traceback.format_exc(), status=1, no_sn=True, display=False)
+            _pipeline_fail(job)
+        finally:
+            merge_fifo.task_done()
+
+
+def ensure_pipeline_workers():
+    global _pipeline_workers_started
+    with _pipeline_workers_lock:
+        if _pipeline_workers_started:
             return
         n = Config.get_max_multi_thread()
         for i in range(n):
-            t = threading.Thread(target=_fifo_worker_main, daemon=True, name='download-fifo-worker-' + str(i + 1))
-            t.start()
-        _fifo_workers_started = True
+            threading.Thread(
+                target=_ingress_worker_main, daemon=True,
+                name='pipeline-ingress-' + str(i + 1)).start()
+            threading.Thread(
+                target=_download_worker_main, daemon=True,
+                name='pipeline-download-' + str(i + 1)).start()
+            threading.Thread(
+                target=_merge_worker_main, daemon=True,
+                name='pipeline-merge-' + str(i + 1)).start()
+        _pipeline_workers_started = True
+
+
+def wait_pipeline_done():
+    ingress_fifo.join()
+    download_fifo.join()
+    merge_fifo.join()
+
+
+def _submit_ingress_job(job):
+    ensure_pipeline_workers()
+    ingress_fifo.put(job)
 
 
 def enqueue_download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_size=False, classify=True,
@@ -637,18 +721,17 @@ def enqueue_download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_fi
     if not _try_claim_download_sn(sn):
         err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
         return False
-    ensure_fifo_workers()
     Config.set_task_waiting(sn, filename=monitor_filename or '')
+    err_print(sn, '加入任務佇列')
     try:
-        download_fifo.put({
+        _submit_ingress_job({
             'type': 'download_only',
-            'kwargs': {
-                'sn': sn,
-                'dl_resolution': dl_resolution,
-                'dl_save_dir': dl_save_dir,
-                'realtime_show_file_size': realtime_show_file_size,
-                'classify': classify,
-            },
+            'sn': sn,
+            'dl_resolution': dl_resolution,
+            'dl_save_dir': dl_save_dir,
+            'realtime_show_file_size': realtime_show_file_size,
+            'classify': classify,
+            'err_counter': 0,
         })
     except BaseException:
         _release_download_sn(sn)
@@ -661,14 +744,15 @@ def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False):
     if not _try_claim_download_sn(sn):
         err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
         return False
-    ensure_fifo_workers()
     Config.set_task_waiting(sn)
+    err_print(sn, '加入任務佇列')
     try:
-        download_fifo.put({
+        _submit_ingress_job({
             'type': 'worker',
             'sn': sn,
             'sn_info': sn_info,
             'realtime_show_file_size': realtime_show_file_size,
+            'err_counter': 0,
         })
     except BaseException:
         _release_download_sn(sn)
@@ -773,7 +857,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     anime_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
                     monitor_filename=anime.get_monitor_filename_for_sn(anime_sn, cui_resolution or None)):
                 enqueued += 1
-                print('新增任務佇列: sn=' + str(anime_sn))
             else:
                 skipped += 1
         if get_info:
@@ -809,7 +892,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
                         monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
                     enqueued += 1
-                    print('新增任務佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
                 else:
                     skipped += 1
             else:
@@ -848,7 +930,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
                         monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
                     enqueued += 1
-                    print('新增任務佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
                 else:
                     skipped += 1
         if get_info:
@@ -872,7 +953,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 a.start()
             elif enqueue_download_only(multi_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify):
                 enqueued += 1
-                print('新增任務佇列: sn=' + str(multi_sn))
             else:
                 skipped += 1
 
@@ -906,7 +986,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 if enqueue_sn_worker(sn, queue[sn], realtime_show_file_size):
                     processing_queue.append(sn)
                     enqueued += 1
-                    err_print(sn, '加入任務佇列')
             msg = '共 ' + str(enqueued) + ' 個任務'
             err_print(0, '任務資訊', msg, no_sn=True)
             print()
@@ -931,7 +1010,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         return
 
     if not get_info:
-        download_fifo.join()
+        wait_pipeline_done()
 
     __kill_thread_when_ctrl_c()
     kill_gost()  # 結束 gost
@@ -1092,7 +1171,8 @@ db_path = os.path.join(working_dir, 'aniGamer.db')
 queue = {}  # 儲存 sn 相關資訊, {'tag': TAG, 'rename': RENAME}, rename,
 processing_queue = []
 init_download_limiter()
-ensure_fifo_workers()
+init_merge_limiter()
+ensure_pipeline_workers()
 upload_limiter = threading.Semaphore(settings['multi_upload'])  # 並發上傳限制器
 db_locker = threading.Semaphore(1)
 thread_tasks = []
@@ -1270,8 +1350,7 @@ if __name__ == '__main__':
         if settings['read_sn_list_when_checking_update']:
             sn_dict = Config.read_sn_list()
         if settings['read_config_when_checking_update']:
-            settings = Config.read_settings()
-            apply_download_limiter(settings['multi-thread'])
+            apply_runtime_settings()
         danmu = settings['danmu'] # 避免手動加入工作時，global 覆寫掉 config 的 danmu 設定
         check_tasks()  # 檢查更新，生成任務佇列
         new_tasks_counter = 0  # 新增任務計數器
@@ -1281,7 +1360,6 @@ if __name__ == '__main__':
                     if enqueue_sn_worker(task_sn, queue[task_sn]):
                         processing_queue.append(task_sn)
                         new_tasks_counter = new_tasks_counter + 1
-                        err_print(task_sn, '加入任務佇列')
         info = '本次更新新增了 '+str(new_tasks_counter)+' 個新任務, 目前佇列中共有 ' + str(len(processing_queue)) + ' 個任務'
         err_print(0, '更新資訊', info, no_sn=True)
         err_print(0, '更新結束', no_sn=True)

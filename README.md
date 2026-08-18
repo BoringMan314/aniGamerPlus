@@ -25,7 +25,7 @@ windows 使用者可以[**點選這裡**](https://github.com/BoringMan314/aniGam
 
 ## 原始碼執行
 
-Python 版本 3 以上
+Python 版本 **3.8～3.11**（建議 **3.11**，與 Release 打包一致）
 
 下載原始碼
 ```bash
@@ -413,7 +413,7 @@ sqlite3資料庫, 可以使用 [SQLite Expert](http://www.sqliteexpert.com/) 等
 參數:
 ```
 >python3 aniGamerPlus.py -h
-當前aniGamerPlus版本: v24.9.12
+當前aniGamerPlus版本: v24.9.13
 usage: aniGamerPlus.py [-h] [--sn SN] [--resolution {360,480,540,576,720,1080}] [--download_mode {single,latest,largest-sn,multi,all,range,list,sn-list,sn-range,db}]
                        [--thread_limit THREAD_LIMIT] [--current_path] [--episodes EPISODES] [--no_classify] [--user_command] [--information_only] [--danmu] [--my_anime]
 

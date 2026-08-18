@@ -23,7 +23,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.12'
+aniGamerPlus_version = 'v24.9.13'
 latest_config_version = 17.4
 latest_database_version = 2.0
 cookie = None
@@ -40,7 +40,9 @@ login_status_cache = {'state': 'unknown', 'label': '', 'detail': ''}
 login_status_probe_mtime = None
 LOGIN_PROBE_SN = 878
 _parse_sn_cd_lock = threading.Lock()
+_parse_sn_cd_cond = threading.Condition(_parse_sn_cd_lock)
 _parse_sn_cd_next_allowed = 0.0
+_parse_sn_cd_log_until = 0.0
 GUEST_COOKIE_DETAIL = 'cookie.txt 為空（請貼上瀏覽器 cookie）'
 max_multi_thread = 5
 max_multi_downloading_segment = 5
@@ -130,17 +132,20 @@ def get_max_multi_thread():
 
 def wait_parse_sn_cd():
     """全程式 SN 頁解析節流（在背景 worker 內 sleep，不阻塞 Dashboard 接令）。"""
+    global _parse_sn_cd_log_until
     settings = read_settings()
     cd = int(settings.get('parse_sn_cd', 0))
     if cd <= 0:
         return
-    with _parse_sn_cd_lock:
+    with _parse_sn_cd_cond:
         now = time.monotonic()
         wait = _parse_sn_cd_next_allowed - now
         if wait > 0:
-            secs = int(wait) if wait == int(wait) else int(wait) + 1
-            __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
-            time.sleep(wait)
+            if now >= _parse_sn_cd_log_until:
+                secs = int(wait) if wait == int(wait) else int(wait) + 1
+                __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
+                _parse_sn_cd_log_until = _parse_sn_cd_next_allowed
+            _parse_sn_cd_cond.wait(timeout=wait)
 
 
 def finish_parse_sn_cd():
@@ -149,8 +154,9 @@ def finish_parse_sn_cd():
     cd = int(settings.get('parse_sn_cd', 0))
     if cd <= 0:
         return
-    with _parse_sn_cd_lock:
+    with _parse_sn_cd_cond:
         _parse_sn_cd_next_allowed = time.monotonic() + cd
+        _parse_sn_cd_cond.notify_all()
 
 
 def legalize_filename(filename):
@@ -937,22 +943,84 @@ def read_cookie(log=False):
     return cookie
 
 
-def probe_bahamut_login(sn=None):
-    """呼叫 getdeviceid/token，回傳 (state, detail)。"""
+def _session_cookie_dict(session):
+    jar = session.cookies
+    try:
+        cookies = jar.get_dict()
+    except AttributeError:
+        cookies = dict(jar)
+    return {k: v for k, v in cookies.items() if v and v != 'deleted'}
+
+
+def _probe_request_headers(ua, sn, for_html=False):
+    host = 'ani.gamer.com.tw'
+    ref = 'https://' + host + '/animeVideo.php?sn=' + str(sn)
+    if for_html:
+        return {
+            'User-Agent': ua,
+            'Referer': ref,
+            'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.6',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'Cache-Control': 'max-age=0',
+            'Origin': 'https://' + host,
+        }
+    return {
+        'User-Agent': ua,
+        'Referer': ref,
+        'Origin': 'https://' + host,
+    }
+
+
+def _persist_login_cookie_rotation(disk_cookies, merged_cookies, log=False, detail='網站回應輪替，已寫回 cookie.txt'):
+    """BAHAID/BAHARUNE 相對 cookie.txt 有變更時寫回（不寫入 ANIME_SIGN 等 session 項）。"""
+    disk_login = _login_cookies_for_probe(disk_cookies)
+    merged_login = _login_cookies_for_probe(merged_cookies)
+    if not merged_login.get('BAHAID') and not merged_login.get('BAHARUNE'):
+        return False
+    if (disk_login.get('BAHAID') == merged_login.get('BAHAID')
+            and disk_login.get('BAHARUNE') == merged_login.get('BAHARUNE')):
+        return False
+    to_save = dict(disk_cookies or {})
+    for key in ('BAHAID', 'BAHARUNE'):
+        if key in merged_login:
+            to_save[key] = merged_login[key]
+    if to_save.get('BAHAID') or to_save.get('BAHARUNE'):
+        to_save.pop('nologinuser', None)
+    renew_cookies(to_save, log=log)
+    if log:
+        __color_print(0, '登入cookie已更新', detail=detail, status=2, no_sn=True)
+    return True
+
+
+def _refresh_baharune_via_homepage(session, login_cookies, html_headers, proxies):
+    """請求首頁觸發 BAHARUNE 輪替；若回應 deleted 則重試一次。"""
+    home_resp = session.get(
+        'https://ani.gamer.com.tw/', headers=html_headers, timeout=15, proxies=proxies)
+    if home_resp.status_code >= 400:
+        home_resp.raise_for_status()
+    set_cookie_str = home_resp.headers.get('set-cookie', '')
+    if re.search(r'(?i)(^|[;,]\s*)BAHARUNE=deleted\b', set_cookie_str):
+        session.cookies.clear()
+        for key, value in login_cookies.items():
+            session.cookies.set(key, value, domain='.gamer.com.tw')
+        session.get(
+            'https://ani.gamer.com.tw/', headers=html_headers, timeout=15, proxies=proxies)
+
+
+def probe_bahamut_login(sn=None, sync_cookie=True, sync_log=False):
+    """呼叫首頁/getdeviceid/token 探測登入；可選同步 BAHARUNE 至 cookie.txt。"""
     if sn is None:
         sn = LOGIN_PROBE_SN
-    cookies = read_cookie(log=False)
-    login_cookies = _login_cookies_for_probe(cookies)
+    disk_cookies = read_cookie(log=False)
+    login_cookies = _login_cookies_for_probe(disk_cookies)
     if not login_cookies.get('BAHAID') and not login_cookies.get('BAHARUNE'):
         return 'guest', GUEST_COOKIE_DETAIL
 
     settings = read_settings()
     ua = settings['ua']
-    headers = {
-        'User-Agent': ua,
-        'Referer': 'https://ani.gamer.com.tw/animeVideo.php?sn=' + str(sn),
-        'Origin': 'https://ani.gamer.com.tw',
-    }
+    html_headers = _probe_request_headers(ua, sn, for_html=True)
+    ajax_headers = _probe_request_headers(ua, sn, for_html=False)
     proxies = None
     if settings.get('use_proxy') and settings.get('proxy'):
         proxies = {'http': settings['proxy'], 'https': settings['proxy']}
@@ -962,9 +1030,12 @@ def probe_bahamut_login(sn=None):
         session.cookies.set(key, value, domain='.gamer.com.tw')
 
     try:
+        if sync_cookie:
+            _refresh_baharune_via_homepage(session, login_cookies, html_headers, proxies)
+
         device_resp = session.get(
             'https://ani.gamer.com.tw/ajax/getdeviceid.php',
-            headers=headers, timeout=15, proxies=proxies)
+            headers=ajax_headers, timeout=15, proxies=proxies)
         if device_resp.status_code >= 400:
             device_resp.raise_for_status()
         device = device_resp.json().get('deviceid')
@@ -975,11 +1046,19 @@ def probe_bahamut_login(sn=None):
             'https://ani.gamer.com.tw/ajax/token.php?adID=0&sn=' + str(sn)
             + '&device=' + device + '&hash=' + ''.join(
                 random.choice('abcdefghijklmnopqrstuvwxyz0123456789') for _ in range(12)))
-        token_resp = session.get(token_url, headers=headers, timeout=15, proxies=proxies)
+        token_resp = session.get(token_url, headers=ajax_headers, timeout=15, proxies=proxies)
         data = token_resp.json()
         if 'error' in data:
             err = data['error']
             return 'error', 'code=' + str(err.get('code', '')) + ' ' + str(err.get('message', '')).strip()
+
+        if sync_cookie:
+            merged = dict(disk_cookies or {})
+            merged.update(_session_cookie_dict(session))
+            _persist_login_cookie_rotation(
+                disk_cookies, merged, log=sync_log,
+                detail='啟動探測已同步網站輪替至 cookie.txt')
+
         if data.get('vip'):
             return 'vip', '已登入 VIP 帳戶'
         return 'login', '非 VIP 帳戶'
@@ -1028,7 +1107,7 @@ def report_login_status(sn=None, log=True):
         return dict(login_status_cache)
     _login_status_reporting = True
     try:
-        state, detail = probe_bahamut_login(sn=sn)
+        state, detail = probe_bahamut_login(sn=sn, sync_cookie=log, sync_log=log)
         label = _login_status_label(state)
         login_status_cache = {'state': state, 'label': label, 'detail': detail}
         login_status_probe_mtime = _cookie_disk_mtime()

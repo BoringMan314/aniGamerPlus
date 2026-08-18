@@ -10,7 +10,7 @@ import Config
 from curl_cffi import requests as curl_requests
 from Danmu import Danmu
 from bs4 import BeautifulSoup
-import re, time, os, platform, requests, random, sys
+import re, time, os, platform, requests, random, sys, json
 import subprocess
 from gevent import subprocess as gevent_subprocess
 from ColorPrint import err_print
@@ -26,6 +26,9 @@ class TryTooManyTimeError(BaseException):
 
 class NonRetryableDownloadError(BaseException):
     pass
+
+
+_playlist_auth_lock = threading.Lock()
 
 
 class ResolutionNotFoundError(NonRetryableDownloadError):
@@ -60,6 +63,7 @@ class Anime:
         self.video_resolution = 0
         self.video_size = 0
         self.realtime_show_file_size = False
+        self._pending_segment_merge = None
         self.upload_succeed_flag = False
         self._danmu = False
         self._proxies = {}
@@ -507,7 +511,30 @@ class Anime:
         return f
 
     def __request_json(self, req, no_cookies=False, show_fail=True, max_retry=3, addition_header=None, use_pyhttpx=False, auth=False):
-        return self.__request(req, no_cookies, show_fail, max_retry, addition_header, use_pyhttpx, auth=auth).json()
+        attempt = 0
+        while True:
+            resp = self.__request(req, no_cookies, show_fail, max_retry, addition_header, use_pyhttpx, auth=auth)
+            body = (getattr(resp, 'text', None) or '').strip()
+            if not body:
+                attempt += 1
+                if attempt > max_retry:
+                    raise TryTooManyTimeError('API 回應為空: ' + req)
+                if show_fail:
+                    err_print(self._sn, '任務狀態', 'API 回應為空，' + str(attempt) + 's 後重試', display=False)
+                time.sleep(attempt)
+                continue
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                attempt += 1
+                if attempt > max_retry:
+                    preview = body[:120].replace('\n', ' ')
+                    code = getattr(resp, 'status_code', '?')
+                    raise NonRetryableDownloadError(
+                        'API 回應非 JSON (HTTP ' + str(code) + '): ' + preview)
+                if show_fail:
+                    err_print(self._sn, '任務狀態', 'API 回應非 JSON，重試中', display=False)
+                time.sleep(attempt)
 
     def __get_m3u8_dict(self):
         # m3u8 取得模組參考自 https://github.com/c0re100/BahamutAnimeDownloader
@@ -525,7 +552,10 @@ class Anime:
             if self._settings['use_mobile_api']:
                 req = f'https://api.gamer.com.tw/mobile_app/anime/v3/m3u8.php?videoSn={str(self._sn)}&device={self._device_id}'
             else:
-                req = 'https://ani.gamer.com.tw/ajax/m3u8.php?sn=' + str(self._sn) + '&device=' + self._device_id
+                req = (
+                    'https://api.gamer.com.tw/anime/v1/video_src.php?videoSn='
+                    + str(self._sn) + '&deviceid=' + self._device_id + '&deviceTypeUseCases=1'
+                )
             self._playlist = self.__request_json(req, auth=True)
 
         def random_string(num):
@@ -603,7 +633,10 @@ class Anime:
             if self._settings['use_mobile_api']:
                 playlist_url = self._playlist['data']['src']
             else:
-                playlist_url = self._playlist['src']
+                if 'data' not in self._playlist:
+                    err_print(self._sn, 'API回應診斷',
+                              'video_src.php 回應內容不含 data: ' + str(self._playlist)[:500], status=1)
+                playlist_url = self._playlist['data']['srcUseCases'][0]['src']['playlist']
             f = self.__request(playlist_url, no_cookies=True, addition_header={'origin': 'https://ani.gamer.com.tw'})
             url_prefix = re.sub(r'playlist.+', '', playlist_url)  # m3u8 URL 字首
             m3u8_list = re.findall(r'=\d+x\d+\n.+', f.content.decode())  # 將包含解析度和 m3u8 檔案提取
@@ -616,13 +649,14 @@ class Anime:
                 m3u8_dict[key] = value
             self._m3u8_dict = m3u8_dict
 
-        get_device_id()
-        user_info = gain_access()
-        if not self._settings['use_mobile_api']:
-            unlock()
-            check_lock()
-            unlock()
-            unlock()
+        with _playlist_auth_lock:
+            get_device_id()
+            user_info = gain_access()
+            if not self._settings['use_mobile_api']:
+                unlock()
+                check_lock()
+                unlock()
+                unlock()
 
         # 收到錯誤反饋
         # 可能是限制級動畫要求登入
@@ -654,10 +688,11 @@ class Anime:
         else:
             err_print(self._sn, '開始下載', '《' + self.get_title() + '》 識別到VIP帳戶, 立即下載')
 
-        if not self._settings['use_mobile_api']:
-            video_start()
-            check_no_ad()
-        get_playlist()
+        with _playlist_auth_lock:
+            if not self._settings['use_mobile_api']:
+                video_start()
+                check_no_ad()
+            get_playlist()
         parse_playlist()
 
     def get_m3u8_dict(self):
@@ -756,7 +791,45 @@ class Anime:
         temp_filename = Config.legalize_filename(temp_filename)
         return temp_filename
 
-    def __segment_download_mode(self, resolution=''):
+    def __segment_merge_local(self, resolution, filename, merging_file, output_file, temp_dir, m3u8_path):
+        err_print(self._sn, '下載狀態', filename + ' 下載完成, 正在解密合併……')
+        Config.update_task_monitor(self._sn, status='正在解密合併', rate=100)
+
+        ffmpeg_cmd = [self._ffmpeg_path,
+                      '-allowed_extensions', 'ALL',
+                      '-i', m3u8_path,
+                      '-c', 'copy', merging_file,
+                      '-y']
+
+        if self._settings['faststart_movflags']:
+            ffmpeg_cmd[7:7] = iter(['-movflags', 'faststart'])
+
+        if self._settings['audio_language']:
+            if self._title.find('中文') == -1:
+                ffmpeg_cmd[7:7] = iter(['-metadata:s:a:0', 'language=jpn'])
+            else:
+                ffmpeg_cmd[7:7] = iter(['-metadata:s:a:0', 'language=chi'])
+
+        run_ffmpeg = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        run_ffmpeg.communicate()
+        self.video_size = int(os.path.getsize(merging_file) / float(1024 * 1024))
+        err_print(self._sn, '下載狀態', filename + ' 解密合併完成, 本集 ' + str(self.video_size) + 'MB, 正在移至番劇目錄……')
+        if os.path.exists(output_file):
+            os.remove(output_file)
+
+        if self._settings['use_copyfile_method']:
+            shutil.copyfile(merging_file, output_file)
+            os.remove(merging_file)
+        else:
+            shutil.move(merging_file, output_file)
+
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        self.local_video_path = output_file
+        self._video_filename = filename
+        err_print(self._sn, '下載完成', filename, status=2)
+
+    def __segment_download_mode(self, resolution='', merge_after=True):
         # 設定檔案存放路徑
         filename = self.__get_filename(resolution)
         merging_filename = self.__get_temp_filename(resolution, temp_suffix='MERGING')
@@ -865,50 +938,35 @@ class Anime:
         if self.realtime_show_file_size:
             sys.stdout.write('\n')
             sys.stdout.flush()
-        err_print(self._sn, '下載狀態', filename + ' 下載完成, 正在解密合併……')
-        Config.update_task_monitor(self._sn, status='正在解密合併', rate=100)
 
-        # 構造 ffmpeg 命令
-        ffmpeg_cmd = [self._ffmpeg_path,
-                      '-allowed_extensions', 'ALL',
-                      '-i', m3u8_path,
-                      '-c', 'copy', merging_file,
-                      '-y']
+        if not merge_after:
+            self._pending_segment_merge = {
+                'resolution': resolution,
+                'filename': filename,
+                'merging_file': merging_file,
+                'output_file': output_file,
+                'temp_dir': temp_dir,
+                'm3u8_path': m3u8_path,
+            }
+            return
 
-        if self._settings['faststart_movflags']:
-            # 將 metadata 移至影片檔案頭部
-            # 此功能可以更快的線上播放影片
-            ffmpeg_cmd[7:7] = iter(['-movflags', 'faststart'])
+        self.__segment_merge_local(
+            resolution, filename, merging_file, output_file, temp_dir, m3u8_path)
 
-        if self._settings['audio_language']:
-            if self._title.find('中文') == -1:
-                ffmpeg_cmd[7:7] = iter(['-metadata:s:a:0', 'language=jpn'])
-            else:
-                ffmpeg_cmd[7:7] = iter(['-metadata:s:a:0', 'language=chi'])
-
-        # 執行 ffmpeg
-        run_ffmpeg = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        run_ffmpeg.communicate()
-        # 記錄檔案大小，單位為 MB
-        self.video_size = int(os.path.getsize(merging_file) / float(1024 * 1024))
-        # 重新命名
-        err_print(self._sn, '下載狀態', filename + ' 解密合併完成, 本集 ' + str(self.video_size) + 'MB, 正在移至番劇目錄……')
-        if os.path.exists(output_file):
-            os.remove(output_file)
-
-        if self._settings['use_copyfile_method']:
-            shutil.copyfile(merging_file, output_file)  # 適配rclone掛載盤
-            os.remove(merging_file)  # 刪除臨時合併檔案
-        else:
-            shutil.move(merging_file, output_file)  # 此方法在遇到rclone掛載盤時會出錯
-
-        # 刪除臨時目錄
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-        self.local_video_path = output_file  # 記錄儲存路徑, FTP上傳用
-        self._video_filename = filename  # 記錄檔名, FTP上傳用
-
-        err_print(self._sn, '下載完成', filename, status=2)
+    def merge_pending_segment(self):
+        pending = self._pending_segment_merge
+        if not pending:
+            return False
+        self._pending_segment_merge = None
+        self.__segment_merge_local(
+            pending['resolution'],
+            pending['filename'],
+            pending['merging_file'],
+            pending['output_file'],
+            pending['temp_dir'],
+            pending['m3u8_path'],
+        )
+        return self.video_size >= 5
 
     def __ffmpeg_download_mode(self, resolution=''):
         # 設定檔案存放路徑
@@ -1004,7 +1062,97 @@ class Anime:
                 run_ffmpeg.returncode) + ' Bad segment=' + str(return_str.find('Failed to open segment'))
             err_print(self._sn, '下載失敗', err_msg_detail, status=1)
 
-    def download(self, resolution='', save_dir='', bangumi_tag='', realtime_show_file_size=False, rename='', classify=True):
+    def finish_download(self, resolution):
+        Config.set_task_completed(self._sn, self.get_filename())
+
+        if self._danmu:
+            try:
+                full_filename = os.path.join(self._bangumi_dir, self.__get_filename(resolution)).replace('.' + self._settings['video_filename_extension'], '.ass')
+                d = Danmu(self._sn, full_filename, Config.read_cookie())
+                d.download(self._settings['danmu_ban_words'])
+            except BaseException as e:
+                err_print(self._sn, '彈幕異常', '下載彈幕時發生未知錯誤: '+str(e), status=1)
+                err_print(self._sn, '彈幕異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
+
+        if self._settings['coolq_notify']:
+            try:
+                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成, 本集 ' + str(self.video_size) + ' MB'
+                if self._settings['coolq_settings']['message_suffix']:
+                    msg = msg + '\n\n' + self._settings['coolq_settings']['message_suffix']
+
+                for query in self._settings['coolq_settings']['query']:
+                    if '?' not in query:
+                        query = query + '?'
+                    else:
+                        query = query + '&'
+                    req = query + self._settings['coolq_settings']['msg_argument_name'] + '=' + quote(msg)
+                    self.__request(req, no_cookies=True)
+            except BaseException as e:
+                err_print(self._sn, 'CQ NOTIFY ERROR', 'Exception: ' + str(e), status=1)
+
+        if self._settings['telebot_notify']:
+            try:
+                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成, 本集 ' + str(self.video_size) + ' MB'
+                vApiTokenTelegram = self._settings['telebot_token']
+                try:
+                    if self._settings['telebot_use_chat_id'] and self._settings['telebot_chat_id']:
+                        chat_id = self._settings['telebot_chat_id']
+                    else:
+                        apiMethod = "getUpdates"
+                        api_url = "https://api.telegram.org/bot" + vApiTokenTelegram + "/" + apiMethod
+                        response = self.__request_json(api_url)
+                        chat_id = response["result"][0]["message"]["chat"]["id"]
+                    try:
+                        api_method = "sendMessage"
+                        req = "https://api.telegram.org/bot" \
+                                + vApiTokenTelegram \
+                                + "/" \
+                                + api_method \
+                                + "?chat_id=" \
+                                + str(chat_id) \
+                                + "&text=" \
+                                + str(msg)
+                        self.__request(req, no_cookies=True)
+                    except:
+                        err_print(self._sn, 'TG NOTIFY ERROR', "Exception: Send msg error\nReq: " + req, status=1)
+                except:
+                    err_print(self._sn, 'TG NOTIFY ERROR', "Exception: Invalid access token\nToken: " + vApiTokenTelegram, status=1)
+            except BaseException as e:
+                err_print(self._sn, 'TG NOTIFY ERROR', 'Exception: ' + str(e), status=1)
+
+        if self._settings['discord_notify']:
+            try:
+                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成，本集 ' + str(self.video_size) + ' MB'
+                url = self._settings['discord_token']
+                data = {
+                    'content': None,
+                    'embeds': [{
+                        'title': '下載完成',
+                        'description': msg,
+                        'color': '5814783',
+                        'author': {
+                            'name': '🔔 動畫瘋'
+                        }}]}
+                r = requests.post(url, json=data)
+                if r.status_code != 204:
+                    err_print(self._sn, 'discord NOTIFY ERROR', "Exception: Send msg error\nReq: " + r.text, status=1)
+            except BaseException as e:
+                err_print(self._sn, 'Discord NOTIFY UNKNOWN ERROR', 'Exception: ' + str(e), status=1)
+
+        if self._settings['plex_refresh']:
+            try:
+                url = 'https://{plex_url}/library/sections/{plex_section}/refresh?X-Plex-Token={plex_token}'.format(
+                    plex_url=self._settings['plex_url'],
+                    plex_section=self._settings['plex_section'],
+                    plex_token=self._settings['plex_token']
+                )
+                r = requests.get(url)
+                if r.status_code != 200:
+                    err_print(self._sn, 'Plex auto Refresh ERROR', status=1)
+            except:
+                err_print(self._sn, 'Plex auto Refresh UNKNOWN ERROR', 'Exception: ' + str(e), status=1)
+
+    def download(self, resolution='', save_dir='', bangumi_tag='', realtime_show_file_size=False, rename='', classify=True, merge_after=True):
         self.realtime_show_file_size = realtime_show_file_size
         if not resolution:
             resolution = self._settings['download_resolution']
@@ -1123,104 +1271,17 @@ class Anime:
         Config.update_task_monitor(self._sn, status='正在下載', filename=self.get_filename())
 
         if self._settings['segment_download_mode']:
-            self.__segment_download_mode(resolution)
+            self.__segment_download_mode(resolution, merge_after=merge_after)
         else:
             self.__ffmpeg_download_mode(resolution)
 
-        Config.set_task_completed(self._sn, self.get_filename())
+        if not merge_after and self._pending_segment_merge:
+            return
 
-        # 下載彈幕
-        if self._danmu:
-            try:
-                full_filename = os.path.join(self._bangumi_dir, self.__get_filename(resolution)).replace('.' + self._settings['video_filename_extension'], '.ass')
-                d = Danmu(self._sn, full_filename, Config.read_cookie())
-                d.download(self._settings['danmu_ban_words'])
-            except BaseException as e:
-                err_print(self._sn, '彈幕異常', '下載彈幕時發生未知錯誤: '+str(e), status=1)
-                err_print(self._sn, '彈幕異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
+        if self.video_size < 5:
+            return
 
-        # 推送 CQ 通知
-        if self._settings['coolq_notify']:
-            try:
-                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成, 本集 ' + str(self.video_size) + ' MB'
-                if self._settings['coolq_settings']['message_suffix']:
-                    # 追加使用者資訊
-                    msg = msg + '\n\n' + self._settings['coolq_settings']['message_suffix']
-
-                for query in self._settings['coolq_settings']['query']:
-                    if '?' not in query:
-                        query = query + '?'
-                    else:
-                        query = query + '&'
-                    req = query + self._settings['coolq_settings']['msg_argument_name'] + '=' + quote(msg)
-                    self.__request(req, no_cookies=True)
-            except BaseException as e:
-                err_print(self._sn, 'CQ NOTIFY ERROR', 'Exception: ' + str(e), status=1)
-
-        # 推送 TG 通知
-        if self._settings['telebot_notify']:
-            try:
-                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成, 本集 ' + str(self.video_size) + ' MB'
-                vApiTokenTelegram = self._settings['telebot_token']
-                try:
-                    if self._settings['telebot_use_chat_id'] and self._settings['telebot_chat_id']:  #手動指定傳送目標
-                        chat_id = self._settings['telebot_chat_id']
-                    else:
-                        apiMethod = "getUpdates"
-                        api_url = "https://api.telegram.org/bot" + vApiTokenTelegram + "/" + apiMethod # Telegram bot api url
-                        response = self.__request_json(api_url)
-                        chat_id = response["result"][0]["message"]["chat"]["id"] # Get chat id
-                    try:
-                        api_method = "sendMessage"
-                        req = "https://api.telegram.org/bot" \
-                                + vApiTokenTelegram \
-                                + "/" \
-                                + api_method \
-                                + "?chat_id=" \
-                                + str(chat_id) \
-                                + "&text=" \
-                                + str(msg)
-                        self.__request(req, no_cookies=True) # Send msg to telegram bot
-                    except:
-                        err_print(self._sn, 'TG NOTIFY ERROR', "Exception: Send msg error\nReq: " + req, status=1) # Send mag error
-                except:
-                    err_print(self._sn, 'TG NOTIFY ERROR', "Exception: Invalid access token\nToken: " + vApiTokenTelegram, status=1) # Cannot find chat id
-            except BaseException as e:
-                err_print(self._sn, 'TG NOTIFY ERROR', 'Exception: ' + str(e), status=1)
-
-        # 推送通知至 Discord
-        if self._settings['discord_notify']:
-            try:
-                msg = '【aniGamerPlus訊息】\n《' + self._video_filename + '》下載完成，本集 ' + str(self.video_size) + ' MB'
-                url = self._settings['discord_token']
-                data = {
-                    'content': None,
-                    'embeds': [{
-                        'title': '下載完成',
-                        'description': msg,
-                        'color': '5814783',
-                        'author': {
-                            'name': '🔔 動畫瘋'
-                        }}]}
-                r = requests.post(url, json=data)
-                if r.status_code != 204:
-                    err_print(self._sn, 'discord NOTIFY ERROR', "Exception: Send msg error\nReq: " + r.text, status=1)
-            except:
-                err_print(self._sn, 'Discord NOTIFY UNKNOWN ERROR', 'Exception: ' + str(e), status=1)
-
-        # plex 自動更新媒體庫
-        if self._settings['plex_refresh']:
-            try:
-                url = 'https://{plex_url}/library/sections/{plex_section}/refresh?X-Plex-Token={plex_token}'.format(
-                    plex_url=self._settings['plex_url'],
-                    plex_section=self._settings['plex_section'],
-                    plex_token=self._settings['plex_token']
-                )
-                r = requests.get(url)
-                if r.status_code != 200:
-                    err_print(self._sn, 'Plex auto Refresh ERROR', status=1)
-            except:
-                err_print(self._sn, 'Plex auto Refresh UNKNOWN ERROR', 'Exception: ' + str(e), status=1)
+        self.finish_download(resolution)
 
     def upload(self, bangumi_tag='', debug_file=''):
         first_connect = True  # 標記是否是第一次連線, 第一次連線會刪除臨時快取目錄

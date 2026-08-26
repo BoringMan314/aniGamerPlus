@@ -130,3 +130,8 @@ temp/
 cookie2.txt
 */*.iml
 **/.DS_Store
+
+*.cul
+
+*.url
+*.zip

@@ -6,6 +6,7 @@
 # @Software: PyCharm
 
 import os, json, re, sys, requests, time, random, codecs, chardet
+import copy
 import sqlite3
 import socket
 import threading
@@ -23,8 +24,8 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.13'
-latest_config_version = 17.4
+aniGamerPlus_version = 'v24.9.14'
+latest_config_version = 17.5
 latest_database_version = 2.0
 cookie = None
 cookie_loaded = False
@@ -42,20 +43,48 @@ LOGIN_PROBE_SN = 878
 _parse_sn_cd_lock = threading.Lock()
 _parse_sn_cd_cond = threading.Condition(_parse_sn_cd_lock)
 _parse_sn_cd_next_allowed = 0.0
-_parse_sn_cd_log_until = 0.0
+_parse_sn_cd_gate = threading.Lock()
+_download_cd_cond = threading.Condition(threading.Lock())
+_download_cd_next_allowed = 0.0
+_download_cd_log_until = 0.0
 GUEST_COOKIE_DETAIL = 'cookie.txt 為空（請貼上瀏覽器 cookie）'
 max_multi_thread = 5
 max_multi_downloading_segment = 5
 tasks_progress_rate = {}  # 儲存任務進度, 供面板使用,
-# 格式: {sn: {'rate': 任務進度百分比(float), 'status': 任務狀態, 'filename': 檔名} }
-# 任務狀態有:  '正在下載' '正在解密合併' '正在移至番劇目錄' '任務失敗, 等待重啟' '等待下載'
+# 格式: {sn: {'rate': 任務進度百分比(float), 'status': 任務狀態, 'filename': 檔名, 'stage': 所屬區塊} }
 tasks_progress_lock = threading.Lock()
 tasks_progress_snapshot = {}
 _task_monitor_rate_throttle = {}
 
+# Dashboard 任務監控分區, 前端依此欄位分成三個區塊顯示
+STAGE_QUEUED = 'queued'  # 排隊: 等待下載/解析中/冷卻中/重試中
+STAGE_DOWNLOADING = 'downloading'  # 下載中(手動與自動任務共用)
+STAGE_MERGING = 'merging'  # 解密合併中
+STAGE_DONE = 'done'  # 已完成
+STAGE_FAILED = 'failed'  # 已失敗
+
+FINISHED_TASK_TTL = 300  # 完成/失敗的任務保留秒數, 逾時自動移出監控避免無限累積
+_task_finished_at = {}
+
 
 def _copy_tasks_progress(src):
     return {k: dict(v) for k, v in src.items()}
+
+
+def _new_task_entry(sn):
+    return {'rate': 0, 'status': '等待下載', 'stage': STAGE_QUEUED,
+            'filename': format_task_monitor_filename(sn, '')}
+
+
+def _purge_finished_tasks_locked(now):
+    # 呼叫前必須持有 tasks_progress_lock
+    if not _task_finished_at:
+        return
+    expired = [sn for sn, ts in _task_finished_at.items() if now - ts > FINISHED_TASK_TTL]
+    for sn in expired:
+        _task_finished_at.pop(sn, None)
+        tasks_progress_rate.pop(sn, None)
+        _task_monitor_rate_throttle.pop(sn, None)
 
 
 def format_task_monitor_filename(sn, display_name=''):
@@ -70,20 +99,23 @@ def format_task_monitor_filename(sn, display_name=''):
     return 'SN=' + str(sn)
 
 
-def update_task_monitor(sn, rate=None, status=None, filename=None):
+def update_task_monitor(sn, rate=None, status=None, filename=None, stage=None):
     sn = int(sn)
-    if rate is not None and status is None and not filename:
-        now = time.monotonic()
-        prev = _task_monitor_rate_throttle.get(sn)
-        if prev is not None and now - prev[0] < 1.0 and abs(rate - prev[1]) < 1.0:
-            return
-        _task_monitor_rate_throttle[sn] = (now, rate)
-    if status is not None or filename:
-        _task_monitor_rate_throttle.pop(sn, None)
+    # 純進度更新才套用節流, 狀態/檔名/分區變更一律即時反映
+    rate_only = rate is not None and status is None and not filename and stage is None
+    now = time.monotonic()
     with tasks_progress_lock:
+        if rate_only:
+            prev = _task_monitor_rate_throttle.get(sn)
+            if prev is not None and now - prev[0] < 1.0 and abs(rate - prev[1]) < 1.0:
+                return
+            _task_monitor_rate_throttle[sn] = (now, rate)
+        else:
+            _task_monitor_rate_throttle.pop(sn, None)
+
         entry = tasks_progress_rate.get(sn)
         if entry is None:
-            entry = {'rate': 0, 'status': '等待下載', 'filename': format_task_monitor_filename(sn, '')}
+            entry = _new_task_entry(sn)
             tasks_progress_rate[sn] = entry
         if rate is not None:
             entry['rate'] = rate
@@ -91,28 +123,58 @@ def update_task_monitor(sn, rate=None, status=None, filename=None):
             entry['status'] = status
         if filename:
             entry['filename'] = format_task_monitor_filename(sn, filename)
+        if stage is not None:
+            entry['stage'] = stage
+            if stage in (STAGE_DONE, STAGE_FAILED):
+                _task_finished_at[sn] = now
+            else:
+                _task_finished_at.pop(sn, None)
+        _purge_finished_tasks_locked(now)
 
 
-def set_task_waiting(sn, filename=''):
-    update_task_monitor(sn, rate=0, status='等待下載', filename=filename)
+def set_task_waiting(sn, filename='', status='等待下載'):
+    update_task_monitor(sn, rate=0, status=status, filename=filename, stage=STAGE_QUEUED)
+
+
+def set_task_queued(sn, status, filename=None, rate=None):
+    """任務回到排隊區塊(解析中、冷卻中、重試中)。"""
+    update_task_monitor(sn, rate=rate, status=status, filename=filename, stage=STAGE_QUEUED)
+
+
+def set_task_downloading(sn, filename=None, rate=None, status='正在下載'):
+    update_task_monitor(sn, rate=rate, status=status, filename=filename, stage=STAGE_DOWNLOADING)
+
+
+def set_task_merging(sn, filename=None, status='正在解密合併'):
+    update_task_monitor(sn, rate=100, status=status, filename=filename, stage=STAGE_MERGING)
 
 
 def set_task_failed(sn, status='任務失敗'):
-    update_task_monitor(sn, rate=0, status=status)
+    update_task_monitor(sn, rate=0, status=status, stage=STAGE_FAILED)
 
 
 def set_task_completed(sn, filename=''):
-    update_task_monitor(sn, rate=100, status='下載完成', filename=filename)
+    update_task_monitor(sn, rate=100, status='下載完成', filename=filename, stage=STAGE_DONE)
+
+
+def remove_task_monitor(sn):
+    sn = int(sn)
+    with tasks_progress_lock:
+        tasks_progress_rate.pop(sn, None)
+        _task_monitor_rate_throttle.pop(sn, None)
+        _task_finished_at.pop(sn, None)
 
 
 def get_tasks_progress_rate():
     global tasks_progress_snapshot
-    if tasks_progress_lock.acquire(blocking=False):
+    if tasks_progress_lock.acquire(timeout=0.2):
         try:
+            _purge_finished_tasks_locked(time.monotonic())
             tasks_progress_snapshot = _copy_tasks_progress(tasks_progress_rate)
             return dict(tasks_progress_snapshot)
         finally:
             tasks_progress_lock.release()
+    # 搶不到鎖時沿用上次快照, 避免面板誤判成「無任務」而清空畫面
     return dict(tasks_progress_snapshot)
 
 
@@ -130,33 +192,88 @@ def get_max_multi_thread():
     return max_multi_thread
 
 
-def wait_parse_sn_cd():
-    """全程式 SN 頁解析節流（在背景 worker 內 sleep，不阻塞 Dashboard 接令）。"""
-    global _parse_sn_cd_log_until
-    settings = read_settings()
-    cd = int(settings.get('parse_sn_cd', 0))
-    if cd <= 0:
-        return
-    with _parse_sn_cd_cond:
-        now = time.monotonic()
-        wait = _parse_sn_cd_next_allowed - now
-        if wait > 0:
-            if now >= _parse_sn_cd_log_until:
-                secs = int(wait) if wait == int(wait) else int(wait) + 1
-                __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
-                _parse_sn_cd_log_until = _parse_sn_cd_next_allowed
-            _parse_sn_cd_cond.wait(timeout=wait)
+def wait_parse_sn_cd(sn=None):
+    """取得全域解析入口；解析與冷卻都必須逐一完成，避免多 worker 同時越過冷卻。"""
+    _parse_sn_cd_gate.acquire()
+    try:
+        cd = int(read_settings().get('parse_sn_cd', 0))
+        if cd <= 0:
+            return
+        with _parse_sn_cd_cond:
+            reported = False
+            while True:
+                wait = _parse_sn_cd_next_allowed - time.monotonic()
+                if wait <= 0:
+                    return
+                if not reported:
+                    secs = int(wait) if wait == int(wait) else int(wait) + 1
+                    detail = 'SN 解析冷卻 ' + str(secs) + ' 秒'
+                    if sn is not None:
+                        detail = 'SN=' + str(sn) + ' 解析冷卻 ' + str(secs) + ' 秒'
+                    __color_print(0, '更新資訊', detail, no_sn=True, status=0)
+                    reported = True
+                _parse_sn_cd_cond.wait(timeout=wait)
+    except BaseException:
+        _parse_sn_cd_gate.release()
+        raise
 
 
 def finish_parse_sn_cd():
     global _parse_sn_cd_next_allowed
-    settings = read_settings()
-    cd = int(settings.get('parse_sn_cd', 0))
+    try:
+        cd = int(read_settings().get('parse_sn_cd', 0))
+        if cd > 0:
+            with _parse_sn_cd_cond:
+                _parse_sn_cd_next_allowed = time.monotonic() + cd
+                _parse_sn_cd_cond.notify_all()
+    finally:
+        _parse_sn_cd_gate.release()
+
+
+def download_cd_remaining():
+    """傳回下載冷卻剩餘秒數, 0 代表可立即開始下載。"""
+    with _download_cd_cond:
+        return max(0.0, _download_cd_next_allowed - time.monotonic())
+
+
+def wait_download_cd(on_wait=None):
+    """開始下載前的全域冷卻閘門。
+
+    on_wait(remaining_seconds) 會在實際需要等待時被呼叫一次, 供呼叫端更新任務狀態。
+    """
+    global _download_cd_log_until
+    remaining = download_cd_remaining()
+    if remaining <= 0:
+        return
+    if on_wait is not None:
+        try:
+            on_wait(remaining)
+        except BaseException:
+            pass
+    while True:
+        with _download_cd_cond:
+            now = time.monotonic()
+            wait = _download_cd_next_allowed - now
+            if wait <= 0:
+                return
+            if now >= _download_cd_log_until:
+                __color_print(0, '下載冷卻', '下載冷卻剩餘 ' + str(int(wait) + 1) + ' 秒',
+                              no_sn=True, status=0)
+                _download_cd_log_until = _download_cd_next_allowed
+            _download_cd_cond.wait(timeout=min(wait, 5))
+
+
+def start_download_cd(cd=None):
+    """一個下載結束後開啟全域冷卻窗口。"""
+    global _download_cd_next_allowed
+    if cd is None:
+        cd = read_settings().get('download_cd', 0)
+    cd = __coerce_int(cd, 0, minimum=0)
     if cd <= 0:
         return
-    with _parse_sn_cd_cond:
-        _parse_sn_cd_next_allowed = time.monotonic() + cd
-        _parse_sn_cd_cond.notify_all()
+    with _download_cd_cond:
+        _download_cd_next_allowed = time.monotonic() + cd
+        _download_cd_cond.notify_all()
 
 
 def legalize_filename(filename):
@@ -285,7 +402,16 @@ def __init_settings():
 
 
 def __update_settings(old_settings):  # 升級配置檔案
-    new_settings = old_settings.copy()
+    new_settings = copy.deepcopy(old_settings)
+
+    # 子項遷移前先確保父鍵存在, 避免使用者刪除整段配置時 KeyError 導致設定被重置
+    if not isinstance(new_settings.get('ftp'), dict):
+        new_settings['ftp'] = {'server': '', 'port': '', 'user': '', 'pwd': '', 'cwd': ''}
+    if not isinstance(new_settings.get('coolq_settings'), dict):
+        new_settings['coolq_settings'] = {}
+    if 'config_version' not in new_settings.keys():
+        new_settings['config_version'] = 1.0
+
     if 'check_latest_version' not in new_settings.keys():  # v2.0 新增檢查更新開關
         new_settings['check_latest_version'] = True
 
@@ -368,7 +494,7 @@ def __update_settings(old_settings):  # 升級配置檔案
         # 預設命令為一分鐘後關機
         new_settings['user_command'] = 'shutdown -s -t 60'
 
-    if 'segment_download_max_retry' not in new_settings.keys():
+    if 'segment_max_retry' not in new_settings.keys():
         # v9.0 新增分段模式下, 分段重試次數
         new_settings['segment_max_retry'] = 8
 
@@ -424,12 +550,13 @@ def __update_settings(old_settings):  # 升級配置檔案
 
     if 'proxy' not in new_settings.keys() or 'proxies' in new_settings.keys():
         # v20 刪除鏈式代理功能
-        if new_settings['proxies']["1"]:
+        old_proxies = new_settings.pop('proxies', None)
+        legacy_proxy = old_proxies.get('1') if isinstance(old_proxies, dict) else None
+        if legacy_proxy:
             # 轉移使用者原有配置
-            new_settings['proxy'] = new_settings['proxies']["1"]
-        else:
+            new_settings['proxy'] = legacy_proxy
+        elif not new_settings.get('proxy'):
             new_settings['proxy'] = 'http://user:passwd@example.com:1000'
-        del new_settings['proxies']
 
     if 'use_dashboard' not in new_settings.keys():
         # v20 上線 Web 控制面板
@@ -514,11 +641,13 @@ def __update_settings(old_settings):  # 升級配置檔案
         # v24.9.3 解析重試基礎間隔(秒)
         new_settings['parse_retry_base_delay'] = 2
 
+    old_version = old_settings.get('config_version', '未知')
     new_settings['config_version'] = latest_config_version
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(new_settings, f, ensure_ascii=False, indent=4)
-    msg = '配置檔案從 v' + str(old_settings['config_version']) + ' 升級到 v' + str(latest_config_version) + ' 你的有效配置不會丟失!'
+    msg = '配置檔案從 v' + str(old_version) + ' 升級到 v' + str(latest_config_version) + ' 你的有效配置不會丟失!'
     __color_print(0, msg, status=2, no_sn=True)
+    return new_settings
 
 
 def __update_database(old_version):
@@ -651,6 +780,21 @@ def __resolve_data_dir(path, default_name, label):
         return default_path
 
 
+def __coerce_int(value, default, minimum=None, maximum=None):
+    """把設定值轉成整數並限制在合法範圍, 空值或非數字一律退回預設值。"""
+    try:
+        if isinstance(value, bool) or value is None or value == '':
+            raise ValueError
+        result = int(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None and result < minimum:
+        result = minimum
+    if maximum is not None and result > maximum:
+        result = maximum
+    return result
+
+
 def read_settings(config=''):
     if config == '':
         if not os.path.exists(config_path):
@@ -659,7 +803,8 @@ def read_settings(config=''):
         settings = __read_settings_file()
     else:
         # 用於檢查 web 控制面板回傳的配置是否正確
-        settings = config
+        # 深拷貝, 避免正規化過程改動呼叫端持有的字典
+        settings = copy.deepcopy(config)
 
     if 'database_version' in settings.keys():
         if settings['database_version'] < latest_database_version:
@@ -669,23 +814,45 @@ def read_settings(config=''):
         settings['database_version'] = 1.0
         __update_database(1.0)
 
-    if settings['config_version'] < latest_config_version:
-        __update_settings(settings)  # 升級配置
-        settings = __read_settings_file()  # 重新載入
+    if settings.get('config_version', 0) < latest_config_version:
+        migrated = __update_settings(settings)  # 升級配置
+        if config == '':
+            settings = __read_settings_file()  # 重新載入
+        else:
+            # 檢查 web 提交的配置時, 直接沿用升級結果, 否則使用者剛送出的設定會被磁碟舊值蓋掉
+            settings = migrated
 
-    if settings['ftp']['port']:
-        settings['ftp']['port'] = int(settings['ftp']['port'])
+    # 已是最新版號但被手動刪掉必要欄位時, 遷移不會被觸發, 這裡補上預設值避免後續 KeyError
+    if not isinstance(settings.get('ftp'), dict):
+        settings['ftp'] = {'server': '', 'port': '', 'user': '', 'pwd': '', 'tls': True,
+                           'cwd': '', 'show_error_detail': False, 'max_retry_num': 10}
+    settings.setdefault('ua', '')
+    settings.setdefault('proxy', '')
+    settings.setdefault('default_download_mode', 'latest')
+    settings.setdefault('download_resolution', '1080')
+    settings.setdefault('video_filename_extension', 'mp4')
+    settings.setdefault('faststart_movflags', False)
+
+    if settings['ftp'].get('port'):
+        settings['ftp']['port'] = __coerce_int(settings['ftp']['port'], 0, minimum=0, maximum=65535)
 
     # 防呆
-    settings['check_frequency'] = int(settings['check_frequency'])
+    settings['check_frequency'] = __coerce_int(settings.get('check_frequency'), 5, minimum=1, maximum=1440)
     settings['download_resolution'] = str(settings['download_resolution'])
-    settings['multi-thread'] = int(settings['multi-thread'])
-    settings['zerofill'] = int(settings['zerofill'])  # 保證為整數
-    if not re.match(r'^(all|latest|largest-sn)$', settings['default_download_mode']):
+    settings['multi-thread'] = __coerce_int(settings.get('multi-thread'), 1, minimum=1, maximum=max_multi_thread)
+    settings['multi_downloading_segment'] = __coerce_int(
+        settings.get('multi_downloading_segment'), 2, minimum=1, maximum=max_multi_downloading_segment)
+    settings['multi_upload'] = __coerce_int(settings.get('multi_upload'), 3, minimum=1, maximum=max_multi_thread)
+    settings['zerofill'] = __coerce_int(settings.get('zerofill'), 1, minimum=1, maximum=6)
+    settings['quantity_of_logs'] = __coerce_int(settings.get('quantity_of_logs'), 7, minimum=1)
+    settings['segment_max_retry'] = __coerce_int(settings.get('segment_max_retry'), 8, minimum=-1, maximum=100)
+    settings['download_cd'] = __coerce_int(settings.get('download_cd'), 60, minimum=0, maximum=86400)
+    settings['parse_sn_cd'] = __coerce_int(settings.get('parse_sn_cd'), 5, minimum=0, maximum=86400)
+    settings['parse_max_retry'] = __coerce_int(settings.get('parse_max_retry'), 5, minimum=1, maximum=10)
+    settings['parse_retry_base_delay'] = __coerce_int(
+        settings.get('parse_retry_base_delay'), 2, minimum=0, maximum=60)
+    if not re.match(r'^(all|resume|latest|largest-sn)$', settings['default_download_mode']):
         settings['default_download_mode'] = 'latest'  # 如果輸入非法模式, 將重置為 latest 模式
-    if settings['quantity_of_logs'] < 1:  # 日誌數量不可小於 1
-        settings['quantity_of_logs'] = 7
-
     if not settings['ua']:
         # 如果 ua 欄位為空
         settings['ua'] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/72.0.3626.96 Safari/537.36"
@@ -706,24 +873,6 @@ def read_settings(config=''):
     settings['use_gost'] = use_gost
     if not settings['proxy']:
         settings['use_proxy'] = False
-
-    if settings['multi-thread'] > max_multi_thread:
-        # 如果執行緒數超限
-        settings['multi-thread'] = max_multi_thread
-
-    if settings['multi_downloading_segment'] > max_multi_downloading_segment:
-        # 如果並發分段數超限
-        settings['multi_downloading_segment'] = max_multi_downloading_segment
-
-    if settings.get('parse_max_retry', 5) < 1:
-        settings['parse_max_retry'] = 1
-    elif settings.get('parse_max_retry', 5) > 10:
-        settings['parse_max_retry'] = 10
-
-    if settings.get('parse_retry_base_delay', 2) < 0:
-        settings['parse_retry_base_delay'] = 0
-    elif settings.get('parse_retry_base_delay', 2) > 60:
-        settings['parse_retry_base_delay'] = 60
 
     if settings['video_filename_extension'].lower() == 'flv':
         # flv 格式會輸出異常, 強制重置
@@ -808,7 +957,7 @@ def read_sn_list():
             if re.match(r'^\d+$', a[0]):
                 rename = ''
                 if len(a) > 1:  # 如果有特別指定下載模式
-                    if re.match(r'^(all|latest|largest-sn)$', a[1]):  # 僅認可合法的模式
+                    if re.match(r'^(all|resume|latest|largest-sn)$', a[1]):  # 僅認可合法的模式
                         sn_dict[int(a[0])] = {'mode': a[1]}
                     else:
                         sn_dict[int(a[0])] = {'mode': settings['default_download_mode']}  # 非法模式一律替換成預設模式
@@ -933,7 +1082,7 @@ def read_cookie(log=False):
 
         if cookie is None and not _cookie_reload_suppress_notice:
             if log or user_edited_file:
-                __cookie_read_log('cookie檔案為空', status=1)
+                __cookie_read_log('cookie.txt 檔案為空', status=1)
 
         if user_edited_file and not _cookie_reload_suppress_notice:
             if cookie:
@@ -1269,7 +1418,31 @@ def __remove_superfluous_logs(max_num):
                 __color_print(0, '刪除過期日誌: ' + log, no_sn=True, display=False)
 
 
+_settings_write_lock = threading.Lock()
+
+
+def update_setting_value(key, value):
+    """只更新單一設定項並落盤, 不會用呼叫端的舊快照覆蓋其他設定。"""
+    with _settings_write_lock:
+        try:
+            current = __read_settings_file()
+        except BaseException as e:
+            __color_print(0, '配置寫入失敗', '無法讀取 config.json: ' + str(e), status=1, no_sn=True)
+            return False
+        if current.get(key) == value:
+            return True
+        current[key] = value
+        try:
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(current, f, ensure_ascii=False, indent=4)
+        except BaseException as e:
+            __color_print(0, '配置寫入失敗', str(e), status=1, no_sn=True)
+            return False
+        return True
+
+
 def write_settings(web_config):
+    # read_settings 內部已深拷貝, 這裡取得的是新字典, 後續刪鍵不會影響呼叫端
     web_config = read_settings(web_config)  # 正規化配置
 
     # 還原配置
@@ -1279,13 +1452,14 @@ def write_settings(web_config):
         web_config["bangumi_dir"] = ''
     if os.path.normcase(web_config['temp_dir']) == os.path.normcase(b):
         web_config['temp_dir'] = ''
-    del web_config['working_dir']
-    del web_config['aniGamerPlus_version']
-    del web_config['use_gost']
+    web_config.pop('working_dir', None)
+    web_config.pop('aniGamerPlus_version', None)
+    web_config.pop('use_gost', None)
 
     # 配置寫入磁碟
-    with open(config_path, 'w', encoding='utf-8') as f:
-        json.dump(web_config, f, ensure_ascii=False, indent=4)
+    with _settings_write_lock:
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(web_config, f, ensure_ascii=False, indent=4)
 
 
 def write_sn_list(sn_list_content):
@@ -1297,10 +1471,12 @@ def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('8.8.8.8', 80))
-        local_ip = s.getsockname()[0]
-    except:
-        local_ip.close()
-    return local_ip
+        return s.getsockname()[0]
+    except OSError:
+        # 無外網或被防火牆阻擋時退回回環位址, 不可讓例外中斷面板啟動
+        return '127.0.0.1'
+    finally:
+        s.close()
 
 
 def parse_proxy(proxy_str: str) -> dict:

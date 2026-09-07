@@ -11,5 +11,24 @@
 			<div style="text-align: center;">當前任務佇列為空</div>
 		</div>
 	</div>
-	<div class="layui-row" id="task_info_panel"></div>
+
+	<div class="monitor-stage" id="section_downloading" style="display: none;">
+		<div class="monitor-stage-title">下載中 <span class="monitor-stage-count" id="count_downloading">0</span></div>
+		<div class="layui-row" id="panel_downloading"></div>
+	</div>
+
+	<div class="monitor-stage" id="section_merging" style="display: none;">
+		<div class="monitor-stage-title">合併中 <span class="monitor-stage-count" id="count_merging">0</span></div>
+		<div class="layui-row" id="panel_merging"></div>
+	</div>
+
+	<div class="monitor-stage" id="section_queued" style="display: none;">
+		<div class="monitor-stage-title">排隊中 <span class="monitor-stage-count" id="count_queued">0</span></div>
+		<div class="layui-row" id="panel_queued"></div>
+	</div>
+
+	<div class="monitor-stage" id="section_finished" style="display: none;">
+		<div class="monitor-stage-title">已結束 <span class="monitor-stage-count" id="count_finished">0</span></div>
+		<div class="layui-row" id="panel_finished"></div>
+	</div>
 </div>

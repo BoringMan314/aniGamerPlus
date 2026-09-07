@@ -8,15 +8,15 @@
 		<script src="../static/js/bootstrap-select.min.js"></script>
 		<link rel="stylesheet" href="../static/css/fontawesome.all.min.css" />
 		<link rel="stylesheet" href="../static/layui/css/layui.css">
-		<link rel="stylesheet" href="../static/css/aniGamerPlus.css" />
-		<script src="../static/js/upload_status.js?v=24.9.13"></script>
-		<script src="../static/js/sn_list.js?v=24.9.13"></script>
-		<script src="../static/js/manual_task.js?v=24.9.13"></script>
-		<script src="../static/js/settings_id_list.js?v=24.9.13"></script>
-		<script src="../static/js/aniGamerPlus.js?v=24.9.13"></script>
+		<link rel="stylesheet" href="../static/css/aniGamerPlus.css?v=24.9.14" />
+		<script src="../static/js/upload_status.js?v=24.9.14"></script>
+		<script src="../static/js/sn_list.js?v=24.9.14"></script>
+		<script src="../static/js/manual_task.js?v=24.9.14"></script>
+		<script src="../static/js/settings_id_list.js?v=24.9.14"></script>
+		<script src="../static/js/aniGamerPlus.js?v=24.9.14"></script>
 		<script src="../static/layui/layui.js"></script>
-		<script src="../static/js/monitor.js?v=24.9.13"></script>
-		<script src="../static/js/dashboard.js?v=24.9.13"></script>
+		<script src="../static/js/monitor.js?v=24.9.14"></script>
+		<script src="../static/js/dashboard.js?v=24.9.14"></script>
 		<title>aniGamerPlus控制臺</title>
 	</head>
 	<body data-active-page="{{ active_page }}">
@@ -104,6 +104,7 @@
 						<select id="download_resolution" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇解析度">
 							<option>1080P</option>
 							<option>720P</option>
+							<option>576P</option>
 							<option>540P</option>
 							<option>480P</option>
 							<option>360P</option>
@@ -116,6 +117,7 @@
 						<select id="default_download_mode" class="selectpicker show-tick form-control input-group-prepend-form-control" data-style="btn-gray" data-header="選擇下載模式">
 							<option data-subtext="最後一集">latest</option>
 							<option data-subtext="全部劇集">all</option>
+							<option value="resume" data-subtext="略過大於 5 MB 的既有檔案">補齊</option>
 							<option data-subtext="最近上傳">largest-sn</option>
 						</select>
 					</div>

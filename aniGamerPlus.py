@@ -31,6 +31,12 @@ try:
 except ImportError:
     curl_requests = None
 
+# 以 `python aniGamerPlus.py` 啟動時本模組名為 __main__, 而 Dashboard/Server.py 會 `import aniGamerPlus`。
+# 若不建立別名, Python 會把同一份檔案再執行一次, 產生第二套 worker、limiter 與全域設定,
+# 導致面板下達的手動任務跑在另一組佇列上(設定不同步、併發翻倍)。
+if __name__ == '__main__' and 'aniGamerPlus' not in sys.modules:
+    sys.modules['aniGamerPlus'] = sys.modules[__name__]
+
 
 def port_is_available(port):
     # 檢查連接埠是否可用（未被佔用），可用則傳回 True
@@ -52,21 +58,25 @@ def gost_port():
     return random_port
 
 
-def _update_monitor_after_parse(anime, sn, resolution='', status='正在解析'):
+def _update_monitor_after_parse(anime, sn, resolution='', status='正在解析',
+                                stage=Config.STAGE_QUEUED):
     try:
         Config.update_task_monitor(
             int(sn),
             rate=0,
             status=status,
             filename=anime.get_monitor_filename_for_sn(sn, resolution or None),
+            stage=stage,
         )
     except BaseException:
-        Config.update_task_monitor(int(sn), rate=0, status=status, filename='')
+        Config.update_task_monitor(int(sn), rate=0, status=status, filename='', stage=stage)
 
 
-def build_anime(sn):
+def build_anime(sn, want_danmu=None):
     anime = {'anime': None, 'failed': True}
-    Config.wait_parse_sn_cd()
+    if want_danmu is None:
+        want_danmu = danmu
+    Config.wait_parse_sn_cd(sn)
     try:
         if settings['use_gost']:
             # 若使用 gost，則隨機指定一個 gost 監聽連接埠
@@ -75,7 +85,7 @@ def build_anime(sn):
             anime['anime'] = Anime(sn)
         anime['failed'] = False
 
-        if danmu:
+        if want_danmu:
             anime['anime'].enable_danmu()
 
     except TryTooManyTimeError:
@@ -239,8 +249,10 @@ def _pipeline_success(job):
     sn = job['sn']
     anime = job['anime']
 
-    if job['type'] == 'worker':
+    if job['type'] == 'worker' and not job.get('skip_db'):
         update_db(anime)
+
+    if job['type'] == 'worker' and not job.get('skip_db'):
         if settings['upload_to_server']:
             upload_limiter.acquire()
             try:
@@ -254,10 +266,6 @@ def _pipeline_success(job):
             finally:
                 upload_limiter.release()
 
-    download_cd = threading.Thread(target=download_cd_counter, kwargs={'release_limiter': False})
-    download_cd.start()
-    download_cd.join()
-
     if job['type'] == 'worker':
         queue.pop(sn, None)
         if sn in processing_queue:
@@ -268,6 +276,8 @@ def _pipeline_success(job):
 
 
 def _try_worker_upload_only(job):
+    if job.get('skip_db') or not settings['upload_to_server']:
+        return False
     sn = job['sn']
     sn_info = job['sn_info']
     bangumi_tag = sn_info['tag']
@@ -278,7 +288,10 @@ def _try_worker_upload_only(job):
             processing_queue.remove(sn)
         upload_limiter.release()
 
-    anime_in_db = read_db(sn)
+    try:
+        anime_in_db = read_db(sn)
+    except IndexError:
+        return False
     if not (settings['upload_to_server'] and anime_in_db['status'] == 1 and anime_in_db['remote_status'] == 0):
         return False
 
@@ -340,8 +353,12 @@ def _call_anime_download(anime, job, merge_after):
 def _pipeline_download_once(job, merge_after):
     anime = job['anime']
     sn = job['sn']
+    # 等併發名額與下載冷卻期間, 任務都停留在「排隊」區塊, 取得名額才移到「下載中」
+    Config.set_task_queued(sn, '等待下載名額')
     thread_limiter.acquire()
     try:
+        _wait_download_cd_for(sn)
+        Config.set_task_downloading(sn, rate=0)
         _call_anime_download(anime, job, merge_after=merge_after)
     except NonRetryableDownloadError as e:
         err_print(sn, '任務失敗', str(e), status=1)
@@ -351,9 +368,12 @@ def _pipeline_download_once(job, merge_after):
         err_print(sn, '下載異常', '異常詳情:\n' + traceback.format_exc(), status=1, display=False)
         anime.video_size = 0
     finally:
+        # 網路下載階段結束(不論成敗)就開啟冷卻窗口, 合併屬本機作業不受冷卻限制
+        Config.start_download_cd(settings['download_cd'])
         thread_limiter.release()
 
     if settings['segment_download_mode'] and anime._pending_segment_merge:
+        Config.set_task_merging(sn, status='等待合併')
         merge_fifo.put(job)
         return 'merge'
 
@@ -390,24 +410,14 @@ def _pipeline_run_download(job):
         job['err_counter'] = err_counter
         anime = job['anime']
         err_print(job['sn'], '任務失敗', 'title=' + anime.get_title() + ' 10s後自動重啟,最多重試三次', status=1)
-        Config.update_task_monitor(job['sn'], status='失敗! 重啟中')
+        Config.set_task_queued(job['sn'], '失敗! 重啟中', rate=0)
         time.sleep(10)
         anime.renew()
 
 
-def download_cd_counter(release_limiter=True):
-    seconds = settings['download_cd']
-    last_log_at = 0.0
-    while seconds > 0:
-        now = time.monotonic()
-        if now - last_log_at >= 25:
-            err_print('', '下載冷卻:', '下載冷卻時間剩餘 ' + str(seconds) + ' 秒', status=0, no_sn=True)
-            last_log_at = now
-        wait_time = min(30, seconds)
-        time.sleep(wait_time)
-        seconds -= wait_time
-    if release_limiter:
-        thread_limiter.release()  # 並發下載限制器
+def _wait_download_cd_for(sn):
+    """開始下載前等待全域下載冷卻, 等待期間任務留在「排隊」區塊。"""
+    Config.wait_download_cd(on_wait=lambda remaining: Config.set_task_queued(sn, '下載冷卻中'))
 
 
 def check_tasks():
@@ -424,9 +434,18 @@ def check_tasks():
         err_print(sn, '更新資訊', '正在檢查《' + anime.get_bangumi_name() + '》')
         episode_list = list(anime.get_episode_list().values())
 
-        if sn_dict[sn]['mode'] == 'all':
-            # 如果使用者選擇全部下載 download_mode = 'all'
+        if sn_dict[sn]['mode'] in ('all', 'resume'):
+            # all 依資料庫狀態追蹤；resume 僅略過同名且大於 5 MB 的既有檔案。
+            existing_filenames = set()
+            if sn_dict[sn]['mode'] == 'resume':
+                existing_filenames = find_completed_video_filenames(settings['bangumi_dir'])
             for ep in episode_list:  # 遍歷劇集列表
+                if sn_dict[sn]['mode'] == 'resume':
+                    filename = anime.get_monitor_filename_for_sn(ep, settings['download_resolution'])
+                    if filename in existing_filenames or ep in queue:
+                        continue
+                    queue[ep] = sn_dict[sn]
+                    continue
                 try:
                     db = read_db(ep)
                     #           未下載的   或                設定要上傳但是沒上傳的                         並且  還沒在佇列中
@@ -478,45 +497,58 @@ def check_tasks():
         #     time.sleep(settings['parse_sn_cd'])
 
 
-def __get_info_only(sn):
+def __get_info_only(sn, info_resolution=None, info_classify=None, info_danmu=None):
+    # 未指定時沿用全域(命令列參數)設定
+    if info_resolution is None:
+        info_resolution = resolution
+    if info_classify is None:
+        info_classify = classify
+    if info_danmu is None:
+        info_danmu = danmu
+
     thread_limiter.acquire()
 
-    anime = build_anime(sn)
+    anime = build_anime(sn, want_danmu=info_danmu)
     if anime['failed']:
         thread_limiter.release()
         return
-    anime = anime['anime']
-    anime.set_resolution(resolution)
-    anime.get_info()
-    download_dir = settings['bangumi_dir']
-    if classify:  # 控制是否建立番劇資料夾
-        download_dir = os.path.join(download_dir, Config.legalize_filename(anime.get_bangumi_name()))
+    try:
+        anime = anime['anime']
+        anime.set_resolution(info_resolution)
+        anime.get_info()
+        download_dir = settings['bangumi_dir']
+        if info_classify:  # 控制是否建立番劇資料夾
+            download_dir = os.path.join(download_dir, Config.legalize_filename(anime.get_bangumi_name()))
 
-    if danmu:
-        if os.path.exists(download_dir):
-            full_filename = os.path.join(download_dir, anime.get_filename()).replace('.' + settings['video_filename_extension'], '.ass')
-            d = Danmu(sn, full_filename, Config.read_cookie())
-            d.download(settings['danmu_ban_words'])
-        else:
-            err_print(sn, '彈幕下載異常', '番劇資料夾不存在: ' + download_dir, status=1)
+        if info_danmu:
+            if os.path.exists(download_dir):
+                full_filename = os.path.join(download_dir, anime.get_filename()).replace('.' + settings['video_filename_extension'], '.ass')
+                d = Danmu(sn, full_filename, Config.read_cookie())
+                d.download(settings['danmu_ban_words'])
+            else:
+                err_print(sn, '彈幕下載異常', '番劇資料夾不存在: ' + download_dir, status=1)
+    finally:
+        thread_limiter.release()
 
-    thread_limiter.release()
 
+def __get_danmu_only(sn, bangumi_name, video_path, danmu_classify=None):
+    if danmu_classify is None:
+        danmu_classify = classify
 
-def __get_danmu_only(sn, bangumi_name, video_path):
     thread_limiter.acquire()
 
     download_dir = settings['bangumi_dir']
-    if classify:  # 控制是否建立番劇資料夾
+    if danmu_classify:  # 控制是否建立番劇資料夾
         download_dir = os.path.join(download_dir, Config.legalize_filename(bangumi_name))
 
-    if os.path.exists(download_dir):
-        d = Danmu(sn, video_path.replace('.' + settings['video_filename_extension'], '.ass'), Config.read_cookie())
-        d.download(settings['danmu_ban_words'])
-    else:
-        err_print(sn, '彈幕下載異常', '番劇資料夾不存在: ' + download_dir, status=1)
-
-    thread_limiter.release()
+    try:
+        if os.path.exists(download_dir):
+            d = Danmu(sn, video_path.replace('.' + settings['video_filename_extension'], '.ass'), Config.read_cookie())
+            d.download(settings['danmu_ban_words'])
+        else:
+            err_print(sn, '彈幕下載異常', '番劇資料夾不存在: ' + download_dir, status=1)
+    finally:
+        thread_limiter.release()
 
 
 def _normalize_thread_limit(limit):
@@ -632,14 +664,15 @@ def _ingress_worker_main():
             if job['type'] == 'worker' and _try_worker_upload_only(job):
                 continue
 
-            anime = build_anime(sn)
+            Config.set_task_queued(sn, '正在解析', rate=0)
+            anime = build_anime(sn, want_danmu=job.get('danmu'))
             if anime['failed']:
                 _pipeline_fail(job, '從任務佇列中移除, 等待下次更新重試.')
                 continue
 
             job['anime'] = anime['anime']
-            resolution = job.get('dl_resolution') or settings['download_resolution']
-            _update_monitor_after_parse(job['anime'], sn, resolution, '正在解析')
+            dl_resolution = job.get('dl_resolution') or settings['download_resolution']
+            _update_monitor_after_parse(job['anime'], sn, dl_resolution, '等待下載')
             download_fifo.put(job)
         except BaseException as e:
             err_print(job.get('sn', 0), '解析佇列', str(e), status=1, no_sn=not job.get('sn'))
@@ -669,6 +702,7 @@ def _merge_worker_main():
             anime = job['anime']
             merge_limiter.acquire()
             try:
+                Config.set_task_merging(job['sn'])
                 if not anime.merge_pending_segment():
                     _pipeline_fail(job, '解密合併失敗')
                     continue
@@ -691,10 +725,12 @@ def ensure_pipeline_workers():
         if _pipeline_workers_started:
             return
         n = Config.get_max_multi_thread()
+        # 解析入口固定單一 FIFO：手動與自動任務依加入順序解析、送進下載佇列。
+        # 下載和合併仍維持 n 個 worker，可照設定並行，不會卡住接令。
+        threading.Thread(
+            target=_ingress_worker_main, daemon=True,
+            name='pipeline-ingress-1').start()
         for i in range(n):
-            threading.Thread(
-                target=_ingress_worker_main, daemon=True,
-                name='pipeline-ingress-' + str(i + 1)).start()
             threading.Thread(
                 target=_download_worker_main, daemon=True,
                 name='pipeline-download-' + str(i + 1)).start()
@@ -716,12 +752,12 @@ def _submit_ingress_job(job):
 
 
 def enqueue_download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_file_size=False, classify=True,
-                          monitor_filename=''):
+                          monitor_filename='', want_danmu=None):
     sn = int(sn)
     if not _try_claim_download_sn(sn):
         err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
         return False
-    Config.set_task_waiting(sn, filename=monitor_filename or '')
+    Config.set_task_waiting(sn, filename=monitor_filename or '', status='排隊中')
     err_print(sn, '加入任務佇列')
     try:
         _submit_ingress_job({
@@ -731,20 +767,22 @@ def enqueue_download_only(sn, dl_resolution='', dl_save_dir='', realtime_show_fi
             'dl_save_dir': dl_save_dir,
             'realtime_show_file_size': realtime_show_file_size,
             'classify': classify,
+            'danmu': danmu if want_danmu is None else want_danmu,
             'err_counter': 0,
         })
     except BaseException:
         _release_download_sn(sn)
+        Config.remove_task_monitor(sn)
         raise
     return True
 
 
-def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False):
+def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False, want_danmu=None):
     sn = int(sn)
     if not _try_claim_download_sn(sn):
         err_print(sn, '略過重複', '此 SN 已在佇列或下載中')
         return False
-    Config.set_task_waiting(sn)
+    Config.set_task_waiting(sn, status='排隊中')
     err_print(sn, '加入任務佇列')
     try:
         _submit_ingress_job({
@@ -752,10 +790,13 @@ def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False):
             'sn': sn,
             'sn_info': sn_info,
             'realtime_show_file_size': realtime_show_file_size,
+            'danmu': danmu if want_danmu is None else want_danmu,
+            'skip_db': sn_info.get('mode') == 'resume',
             'err_counter': 0,
         })
     except BaseException:
         _release_download_sn(sn)
+        Config.remove_task_monitor(sn)
         raise
     return True
 
@@ -769,6 +810,24 @@ def _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit):
         print('佇列更新: 新增 ' + str(enqueued) + ' 個, 略過重複 ' + str(skipped) + ' 個, 執行緒數: ' + str(cui_thread_limit) + '\n')
 
 
+def find_completed_video_filenames(download_dir):
+    """建立大於 5 MB 的既有影片檔名索引，供手動「補齊」保留舊版下載成果。"""
+    completed = set()
+    if not download_dir or not os.path.isdir(download_dir):
+        return completed
+    min_size = 5 * 1024 * 1024
+    for root, _, files in os.walk(download_dir):
+        for filename in files:
+            path = os.path.join(root, filename)
+            try:
+                if os.path.getsize(path) > min_size:
+                    completed.add(filename)
+            except OSError:
+                # 檔案可能正被移動或刪除，這輪補齊交由下載流程處理即可。
+                continue
+    return completed
+
+
 def reset_download_limiter_for_cli(limit):
     """命令列單次執行時設定 limiter；該路徑會 sys.exit，不與自動模式共存。"""
     apply_download_limiter(limit)
@@ -778,8 +837,12 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
           cui_save_dir='', classify=True, get_info=False, user_cmd=False, realtime_show=True, cui_danmu=False,
           dashboard_worker=False):
     global danmu
-    danmu = cui_danmu
-    apply_download_limiter(cui_thread_limit)
+    job_danmu = cui_danmu
+    if not dashboard_worker:
+        # 面板手動任務只影響自己這批 job, 不可覆寫全域彈幕設定與併發上限,
+        # 否則自動任務會被手動任務的參數綁架(例如手動選 1 執行緒後自動下載也退成 1)
+        danmu = cui_danmu
+        apply_download_limiter(cui_thread_limit)
 
     if realtime_show:
         if cui_thread_limit == 1 or cui_download_mode in ('single', 'latest', 'largest-sn'):
@@ -798,7 +861,8 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         if get_info:
             __get_info_only(sn)
         else:
-            enqueue_download_only(sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify)
+            enqueue_download_only(sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                                  want_danmu=job_danmu)
 
     elif cui_download_mode == 'latest' or cui_download_mode == 'largest-sn':
         if cui_download_mode == 'latest':
@@ -828,11 +892,14 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
             target_sn = bangumi_list[-1]
             enqueue_download_only(
                 target_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
-                monitor_filename=anime.get_monitor_filename_for_sn(target_sn, cui_resolution or None))
+                monitor_filename=anime.get_monitor_filename_for_sn(target_sn, cui_resolution or None),
+                want_danmu=job_danmu)
 
-    elif cui_download_mode == 'all':
+    elif cui_download_mode in ('all', 'resume'):
         if get_info:
             print('當前模式: 查詢本番劇所有劇集資訊\n')
+        elif cui_download_mode == 'resume':
+            print('當前下載模式: 補齊本番劇未完成劇集\n')
         else:
             print('當前下載模式: 下載本番劇所有劇集\n')
 
@@ -845,7 +912,11 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         bangumi_list = list(anime.get_episode_list().values())
         bangumi_list.sort()
         enqueued = 0
-        skipped = 0
+        duplicate_skipped = 0
+        existing_file_skipped = 0
+        existing_filenames = set()
+        if cui_download_mode == 'resume':
+            existing_filenames = find_completed_video_filenames(cui_save_dir or settings['bangumi_dir'])
         for anime_sn in bangumi_list:
             if get_info:
                 task = threading.Thread(target=__get_info_only, args=(anime_sn,))
@@ -853,16 +924,22 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 thread_tasks.append(task)
                 task.start()
                 print('新增查詢佇列: sn=' + str(anime_sn))
+            elif cui_download_mode == 'resume' and anime.get_monitor_filename_for_sn(
+                    anime_sn, cui_resolution or None) in existing_filenames:
+                existing_file_skipped += 1
             elif enqueue_download_only(
                     anime_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
-                    monitor_filename=anime.get_monitor_filename_for_sn(anime_sn, cui_resolution or None)):
+                    monitor_filename=anime.get_monitor_filename_for_sn(anime_sn, cui_resolution or None),
+                    want_danmu=job_danmu):
                 enqueued += 1
             else:
-                skipped += 1
+                duplicate_skipped += 1
         if get_info:
             print('所有查詢任務已新增至佇列, 共 ' + str(len(bangumi_list)) + ' 個任務\n')
         else:
-            _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit)
+            _print_batch_enqueue_summary(enqueued, duplicate_skipped, cui_thread_limit)
+            if cui_download_mode == 'resume':
+                print('補齊模式略過既有大於 5 MB 檔案 ' + str(existing_file_skipped) + ' 個\n')
 
     elif cui_download_mode == 'range':
         if get_info:
@@ -890,7 +967,8 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
                 elif enqueue_download_only(
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
-                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
+                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None),
+                        want_danmu=job_danmu):
                     enqueued += 1
                 else:
                     skipped += 1
@@ -928,7 +1006,8 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
                 elif enqueue_download_only(
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
-                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None)):
+                        monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None),
+                        want_danmu=job_danmu):
                     enqueued += 1
                 else:
                     skipped += 1
@@ -951,7 +1030,8 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 a.daemon = True
                 thread_tasks.append(a)
                 a.start()
-            elif enqueue_download_only(multi_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify):
+            elif enqueue_download_only(multi_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
+                                       want_danmu=job_danmu):
                 enqueued += 1
             else:
                 skipped += 1
@@ -1180,6 +1260,10 @@ gost_subprocess = None  # 存放 gost 的 subprocess.Popen 物件, 用於結束�
 gost_port = gost_port()  # gost 埠
 sn_dict = Config.read_sn_list()
 danmu = settings['danmu']
+# resolution / classify 只有命令列模式會覆寫, 這裡先給預設值,
+# 讓自動模式與面板走到 __get_info_only、__get_danmu_only 時不會撞上未定義的全域
+resolution = settings['download_resolution']
+classify = settings['classify_bangumi']
 
 if __name__ == '__main__':
     if settings['check_latest_version']:
@@ -1214,7 +1298,7 @@ if __name__ == '__main__':
         parser.add_argument('--sn', '-s', type=int, help='影片sn碼(數字)')
         parser.add_argument('--resolution', '-r', type=int, help='指定下載清晰度(數字)', choices=[360, 480, 540, 576, 720, 1080])
         parser.add_argument('--download_mode', '-m', type=str, help='下載模式', default='single',
-                            choices=['single', 'latest', 'largest-sn', 'multi', 'all', 'range', 'list', 'sn-list', 'sn-range', 'db'])
+                            choices=['single', 'latest', 'largest-sn', 'multi', 'all', 'resume', 'range', 'list', 'sn-list', 'sn-range', 'db'])
         parser.add_argument('--thread_limit', '-t', type=int, help='最高並發下載數(數字)')
         parser.add_argument('--current_path', '-c', action='store_true', help='下載到當前工作目錄')
         parser.add_argument('--episodes', '-e', type=str, help='僅下載指定劇集')
@@ -1335,13 +1419,15 @@ if __name__ == '__main__':
 
     err_print(0, '自動模式啟動aniGamerPlus '+version_msg, no_sn=True, display=False)
     err_print(0, '工作目錄: ' + working_dir, no_sn=True, display=False)
-    Config.startup_cookie_check()
 
     if settings['use_proxy']:
         __init_proxy()
 
     if settings['use_dashboard']:
         run_dashboard()
+
+    # 先讓控制面板可連線，再探測登入狀態；面板初次開啟即可取得更新後的狀態。
+    Config.startup_cookie_check()
 
     while True:
         print()

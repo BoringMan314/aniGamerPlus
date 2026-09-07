@@ -109,7 +109,7 @@ class Anime:
             os.environ['NO_PROXY'] = "127.0.0.1,localhost"
 
     def renew(self):
-        Config.wait_parse_sn_cd()
+        Config.wait_parse_sn_cd(self._sn)
         try:
             self.__get_src()
             self.__get_title()
@@ -622,9 +622,12 @@ class Anime:
                         err_print(self._sn, '透過廣告時間' + str(ads_time) + '秒, 記錄到配置檔案', status=2)
                         if self._settings['use_mobile_api']:
                             self._settings['mobile_ads_time'] = ads_time
+                            ads_key = 'mobile_ads_time'
                         else:
                             self._settings['ads_time'] = ads_time
-                        Config.write_settings(self._settings)  # 儲存到配置檔案
+                            ads_key = 'ads_time'
+                        # 只回寫這一項, 避免用本任務啟動時的舊快照蓋掉使用者期間在面板改過的設定
+                        Config.update_setting_value(ads_key, ads_time)
             else:
                 raise NonRetryableDownloadError('遭到動畫瘋地區限制, 你的IP可能不被動畫瘋認可!')
 
@@ -793,7 +796,7 @@ class Anime:
 
     def __segment_merge_local(self, resolution, filename, merging_file, output_file, temp_dir, m3u8_path):
         err_print(self._sn, '下載狀態', filename + ' 下載完成, 正在解密合併……')
-        Config.update_task_monitor(self._sn, status='正在解密合併', rate=100)
+        Config.set_task_merging(self._sn)
 
         ffmpeg_cmd = [self._ffmpeg_path,
                       '-allowed_extensions', 'ALL',
@@ -977,13 +980,22 @@ class Anime:
         downloading_file = os.path.join(self._temp_dir, downloading_filename)
 
         # 構造 ffmpeg 命令
+        output_options = []
+        if self._settings['faststart_movflags']:
+            output_options += ['-movflags', 'faststart']
+
+        if self._settings['audio_language']:
+            if self._title.find('中文') == -1:
+                output_options += ['-metadata:s:a:0', 'language=jpn']
+            else:
+                output_options += ['-metadata:s:a:0', 'language=chi']
+
         ffmpeg_cmd = [self._ffmpeg_path,
                       '-user_agent',
                       self._settings['ua'],
                       '-headers', "Origin: https://ani.gamer.com.tw",
                       '-i', self._m3u8_dict[resolution],
-                      '-c', 'copy', downloading_file,
-                      '-y']
+                      '-c', 'copy'] + output_options + [downloading_file, '-y']
 
         if os.path.exists(downloading_file):
             os.remove(downloading_file)  # 清理任務失敗的屍體
@@ -1177,7 +1189,8 @@ class Anime:
             self._bangumi_name = self._bangumi_name.replace(bangumi_name, rename)
 
         # 下載任務開始
-        Config.update_task_monitor(self._sn, rate=0, status='正在解析', filename=self.get_filename())
+        # 此時已佔用下載名額並通過冷卻, 歸在「下載中」區塊, 避免卡片在區塊間來回跳動
+        Config.set_task_downloading(self._sn, rate=0, status='正在解析', filename=self.get_filename())
 
         try:
             self.__get_m3u8_dict()  # 取得 m3u8 列表
@@ -1268,7 +1281,7 @@ class Anime:
         self.video_resolution = int(resolution)
 
         # 解析完成, 開始下載
-        Config.update_task_monitor(self._sn, status='正在下載', filename=self.get_filename())
+        Config.set_task_downloading(self._sn, filename=self.get_filename())
 
         if self._settings['segment_download_mode']:
             self.__segment_download_mode(resolution, merge_after=merge_after)

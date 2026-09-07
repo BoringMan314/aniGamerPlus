@@ -12,7 +12,7 @@ from gevent import sleep as gevent_sleep, spawn
 
 import json, sys, os, re, time
 import threading, traceback
-import random, string
+import secrets
 
 from aniGamerPlus import Config
 from flask import Flask, request, jsonify
@@ -38,6 +38,25 @@ app = Flask(__name__, template_folder=template_path, static_folder=static_path)
 app.debug = False
 sockets = Sockets(app)
 
+EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
+
+
+def extension_response(data, status=200):
+    response = jsonify(data)
+    response.status_code = status
+    origin = request.headers.get('Origin', '')
+    if origin.startswith(EXTENSION_ORIGIN_PREFIX):
+        response.headers['Access-Control-Allow-Origin'] = origin
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Private-Network'] = 'true'
+        response.headers['Vary'] = 'Origin'
+    return response
+
+
+def is_ani_gamer_cookie_name(name):
+    return name in ('nologinuser', 'ckM', 'age_limit_content', 'avtrv') or name.startswith(('BAHA', 'MB_', 'ANIME_'))
+
 # 日誌處理
 # logger = logging.getLogger('werkzeug')
 logger = logging.getLogger('geventwebsocket')
@@ -49,8 +68,39 @@ handler.extMatch = re.compile(r'^\d{4}-\d{2}-\d{2}.log')
 logger.addHandler(handler)
 logger.propagate = False  # 不在控制面板上輸出
 
-# websocket鑑權需要的 token, 隨機一個 32 位初始 token
-websocket_token = ''.join(random.sample(string.ascii_letters + string.digits, 32))
+# websocket 鑑權 token 池: 一次性、有時限, 且允許多個分頁同時各持一張
+_ws_tokens = {}
+_ws_tokens_lock = threading.Lock()
+WS_TOKEN_TTL = 60  # 秒, 領取後須在此時間內完成 websocket 連線
+WS_TOKEN_MAX = 64  # 上限, 防止有人狂打 /data/get_token 撐爆記憶體
+
+
+def _purge_ws_tokens_locked(now):
+    for expired in [t for t, issued in _ws_tokens.items() if now - issued > WS_TOKEN_TTL]:
+        _ws_tokens.pop(expired, None)
+
+
+def issue_ws_token():
+    token = secrets.token_urlsafe(32)
+    now = time.monotonic()
+    with _ws_tokens_lock:
+        _purge_ws_tokens_locked(now)
+        while len(_ws_tokens) >= WS_TOKEN_MAX:
+            _ws_tokens.pop(min(_ws_tokens, key=_ws_tokens.get), None)
+        _ws_tokens[token] = now
+    return token
+
+
+def consume_ws_token(token):
+    # 一次性核銷; 空值直接拒絕, 避免以 ?token= 命中已清空的舊 token
+    if not token:
+        return False
+    now = time.monotonic()
+    with _ws_tokens_lock:
+        _purge_ws_tokens_locked(now)
+        issued = _ws_tokens.pop(token, None)
+    return issued is not None
+
 
 _manual_task_queue = _stdlib_queue.Queue(maxsize=32)
 
@@ -70,28 +120,30 @@ def _process_manual_task_raw(raw):
         return
     settings = Config.read_settings()
 
-    if data['resolution'] not in ('360', '480', '540', '720', '1080'):
+    if str(data.get('resolution', '')) not in ('360', '480', '540', '576', '720', '1080'):
         resolution = settings['download_resolution']
     else:
-        resolution = data['resolution']
+        resolution = str(data['resolution'])
 
-    if data['mode'] not in ('single', 'latest', 'all', 'largest-sn'):
+    if data.get('mode') not in ('single', 'latest', 'all', 'resume', 'largest-sn'):
         mode = 'single'
     else:
         mode = data['mode']
 
-    if data['thread']:
-        thread = int(data['thread'])
-    else:
+    try:
+        thread = int(data.get('thread') or 1)
+    except (TypeError, ValueError):
         thread = 1
-    if thread > Config.get_max_multi_thread():
-        thread_limit = Config.get_max_multi_thread()
-    else:
-        thread_limit = thread
+    thread_limit = max(1, min(thread, Config.get_max_multi_thread()))
+
+    sn = str(data.get('sn', '')).strip()
+    if not sn.isdigit():
+        err_print(0, 'Dashboard', '手動任務 sn 不是數字, 已忽略: ' + sn[:50], no_sn=True, status=1)
+        return
 
     err_print(0, 'Dashboard', '透過 Web 控制面板下達了手動任務', no_sn=True, status=2)
-    cui(data['sn'], resolution, mode, thread_limit, [], classify=data['classify'], realtime_show=False,
-        cui_danmu=data['danmu'], dashboard_worker=True)
+    cui(sn, resolution, mode, thread_limit, [], classify=bool(data.get('classify', True)),
+        realtime_show=False, cui_danmu=bool(data.get('danmu', False)), dashboard_worker=True)
 
 
 def _manual_task_worker():
@@ -163,6 +215,48 @@ def monitor():
     return render_template('index.html', active_page='monitor')
 
 
+@app.route('/api/extension/handshake', methods=['GET', 'OPTIONS'])
+def extension_handshake():
+    if request.method == 'OPTIONS':
+        return extension_response({})
+    return extension_response({'protocol': 1, 'cookieEndpoint': '/api/extension/cookie'})
+
+
+@app.route('/api/extension/cookie', methods=['POST', 'OPTIONS'])
+def extension_cookie():
+    if request.method == 'OPTIONS':
+        return extension_response({})
+
+    data = request.get_json(silent=True)
+    entries = data.get('entries') if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return extension_response({'ok': False}, 400)
+
+    cookies = {}
+    for entry in entries:
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            return extension_response({'ok': False}, 400)
+        name, value = entry
+        if not isinstance(name, str) or not isinstance(value, str) or not is_ani_gamer_cookie_name(name):
+            return extension_response({'ok': False}, 400)
+        if not value or '\r' in value or '\n' in value or ';' in value:
+            return extension_response({'ok': False}, 400)
+        cookies[name] = value
+
+    if not cookies:
+        return extension_response({'ok': False}, 400)
+    try:
+        Config.renew_cookies(cookies, log=False)
+    except BaseException:
+        logger.exception('擴充功能 Cookie 更新失敗')
+        return extension_response({'ok': False}, 500)
+    saved_cookies = Config.read_cookie(log=False) or {}
+    if any(saved_cookies.get(name) != value for name, value in cookies.items()):
+        return extension_response({'ok': False}, 500)
+    err_print(0, 'Cookie', '已從插件更新 cookie.txt', no_sn=True, status=2)
+    return extension_response({'ok': True})
+
+
 @app.route('/data/login_status', methods=['GET'])
 def login_status_api():
     return jsonify(Config.get_login_status(for_dashboard=True))
@@ -185,18 +279,22 @@ def recv_config():
     for id in id_list:
         new_settings[id] = data[id]  # 更新配置
     Config.write_settings(new_settings)  # 儲存配置
-    _apply_runtime_config_after_save(new_settings)
+    # 用落盤後重新正規化的設定套用到執行期, 避免把未經校驗的原始值(如 use_gost、超界併發數)帶進記憶體
+    _apply_runtime_config_after_save(Config.read_settings())
     err_print(0, 'Dashboard', '透過 Web 控制面板更新了 config.json', no_sn=True, status=2)
     return '{"status":"200"}'
 
 
 def _apply_runtime_config_after_save(new_settings):
-    import sys
+    # 正常情況 __main__ 與 aniGamerPlus 已是同一個模組, 這裡去重以防仍有兩份實例
+    applied = set()
     for mod_name in ('__main__', 'aniGamerPlus'):
         mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, 'apply_runtime_settings'):
+        if mod is None or id(mod) in applied:
+            continue
+        if hasattr(mod, 'apply_runtime_settings'):
+            applied.add(id(mod))
             mod.apply_runtime_settings(new_settings)
-            return
 
 
 @app.route('/manualTask', methods=['POST'])
@@ -217,23 +315,17 @@ def show_sn_list():
 
 @app.route('/data/get_token', methods=['GET'])
 def get_token():
-    global websocket_token
-    # 生成 32 位隨機字串作為token
-    websocket_token = ''.join(random.sample(string.ascii_letters + string.digits, 32))
-    return websocket_token, '200 ok'
+    # 每次領取都是獨立的一次性 token, 不會讓新分頁把既有分頁的 token 作廢
+    return issue_ws_token(), '200 ok'
 
 
 @sockets.route('/data/tasks_progress')
 def tasks_progress(ws):
     # 鑑權
-    global websocket_token
-    token = request.args.get('token')
-    if token != websocket_token:
+    if not consume_ws_token(request.args.get('token')):
         ws.send('Unauthorized')
         ws.close()
         return
-    # 一次性 token
-    websocket_token = ''
 
     def push_progress(tick):
         if ws.closed:

@@ -40,7 +40,13 @@ function readManualConfig() {
 		return;
 	}
 
-	manualData['sn'] = link.replace(/(https:\/\/)?ani\.gamer\.com\.tw\/animeVideo\.php\?sn=/i, '');
+	// 允許貼完整網址或只填 sn，網址後綴的其他參數一併去掉
+	var snMatch = /(?:[?&]sn=)?(\d+)\s*(?:&|$)/.exec(link.trim());
+	if (!snMatch) {
+		alert('無法從連結取得 sn，請確認網址或直接輸入數字 sn！');
+		return;
+	}
+	manualData['sn'] = snMatch[1];
 	manualData['mode'] = $('#manual_mode').val();
 	manualData['resolution'] = $('#manual_resolution').val().replace('P', '');
 	manualData['classify'] = $('#manual_classify').is(':checked');

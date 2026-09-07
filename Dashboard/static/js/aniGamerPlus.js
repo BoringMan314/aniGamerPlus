@@ -21,27 +21,86 @@ $.ajax({
 });
 
 function parseProxy(proxy) {
-	proxy_protocol = proxy.replace(/:\/\/.*/i, '').toUpperCase();
-	if (/.*@.*/.test(proxy)) {
-		proxy_user = /:\/\/.*?:/g.exec(proxy)[0].replace(/:(\/\/)?/g, '');
-		proxy_passwd = /:.*@/.exec(proxy)[0].replace(proxy_user, '')
-			.replace(/(:\/\/:)?@?/g, '');
-		proxy = proxy.replace(proxy_user + ':' + proxy_passwd + '@', '');
+	// 逐段拆解, 任何一段缺失都只讓該欄位留空, 不可拋例外, 否則整個設定頁會渲染不出來
+	proxy = (proxy || '').trim();
+	proxy_protocol = 'HTTP';
+	proxy_ip = '';
+	proxy_port = '';
+	proxy_user = '';
+	proxy_passwd = '';
+
+	var rest = proxy;
+	var schemeMatch = /^([a-z0-9+.\-]+):\/\/([\s\S]*)$/i.exec(rest);
+	if (schemeMatch) {
+		proxy_protocol = schemeMatch[1].toUpperCase();
+		rest = schemeMatch[2];
 	}
-	var tmp = proxy.replace(/.*:\/\//i, '');
-	if (proxy.length > 0) {
-		proxy_ip = /:.*:/.exec(proxy)[0].replace(/:(\/\/)?/g, '');
-		proxy_port = /:\d+/.exec(proxy)[0].replace(/:/, '');
+
+	var at = rest.lastIndexOf('@');
+	if (at !== -1) {
+		var cred = rest.slice(0, at);
+		rest = rest.slice(at + 1);
+		var sep = cred.indexOf(':');
+		if (sep === -1) {
+			proxy_user = cred;
+		} else {
+			proxy_user = cred.slice(0, sep);
+			proxy_passwd = cred.slice(sep + 1);
+		}
+	}
+
+	var portMatch = /:(\d+)$/.exec(rest);
+	if (portMatch) {
+		proxy_port = portMatch[1];
+		proxy_ip = rest.slice(0, rest.length - portMatch[0].length);
 	} else {
-		proxy_ip = '';
-		proxy_port = '';
+		proxy_ip = rest;
 	}
-	
+
 	dataArrays.proxy_protocol = proxy_protocol;
 	dataArrays.proxy_ip = proxy_ip;
 	dataArrays.proxy_port = proxy_port;
 	dataArrays.proxy_user = proxy_user;
 	dataArrays.proxy_passwd = proxy_passwd;
+}
+
+function buildProxyString() {
+	var protocol = String(dataArrays['proxy_protocol'] || 'http').toLowerCase();
+	var ip = String(dataArrays['proxy_ip'] || '').trim();
+	var port = String(dataArrays['proxy_port'] || '').trim();
+	var user = String(dataArrays['proxy_user'] || '');
+	var passwd = String(dataArrays['proxy_passwd'] || '');
+
+	if (!ip) {
+		return ''; // 沒填位址就視為未設定代理
+	}
+	var host = port ? ip + ':' + port : ip;
+	if (user.length === 0 || passwd.length === 0) {
+		return protocol + '://' + host; // 帳號或密碼任一為空即不帶認證資訊
+	}
+	return protocol + '://' + user + ':' + passwd + '@' + host;
+}
+
+function setSelectValue(id, value) {
+	// 依 value / 顯示文字精確比對, 避免 :contains 用子字串誤選到別的選項
+	var $select = $('#' + id);
+	var target = String(value == null ? '' : value).trim();
+	var candidates = [target, target + 'P'];
+	var matched = null;
+	$select.find('option').each(function () {
+		var $option = $(this);
+		var optionValue = $option.attr('value');
+		var text = $option.text().trim();
+		if (matched === null && (candidates.indexOf(text) !== -1
+			|| (optionValue !== undefined && candidates.indexOf(String(optionValue)) !== -1))) {
+			matched = $option;
+		}
+		$option.prop('selected', false);
+	});
+	if (matched !== null) {
+		matched.prop('selected', true);
+	}
+	$select.selectpicker('render');
 }
 
 function reloadSetting() {
@@ -92,11 +151,9 @@ function renderJson() {
 				break;
 			case 'select-one':
 				if (id == 'proxy_protocol') {
-					$("#" + id).selectpicker('val', dataArrays[id].toUpperCase());
+					$("#" + id).selectpicker('val', String(dataArrays[id] || 'HTTP').toUpperCase());
 				} else {
-					$("#" + id).find("option:contains('" + dataArrays[id] + "')")
-						.prop("selected", true);
-					$("#" + id).selectpicker('render');
+					setSelectValue(id, dataArrays[id]);
 				}
 				break;
 
@@ -132,23 +189,10 @@ function readSettings() {
 				}
 				break;
 		}
-
-		// 合併代理配置
-		var a = ['proxy_protocol', 'proxy_ip', 'proxy_port', 'proxy_user', 'proxy_passwd'];
-		for (var i in a) {
-			var ip_port = dataArrays["proxy_ip"] + ':' + dataArrays["proxy_port"];
-			var protocol = dataArrays["proxy_protocol"] + '://';
-			if (dataArrays["proxy_user"]?.length * dataArrays["proxy_passwd"]?.length == 0) {
-				// 如果沒有使用者密碼
-				dataArrays["proxy"] = protocol + ip_port;
-			} else {
-				// 如果有使用者密碼
-				var user_pw = dataArrays["proxy_user"] + ':' + dataArrays["proxy_passwd"] + '@';
-				dataArrays["proxy"] = protocol + user_pw + ip_port;
-			}
-
-		}
 	}
+
+	// 讀完所有欄位後再合併一次代理配置
+	dataArrays["proxy"] = buildProxyString();
 
 	$.ajax({
 		url: '/uploadConfig',

@@ -247,3 +247,38 @@ body {
 	font-weight: bold;
 	font-size: larger;
 }
+/* 任務監控：排隊 / 下載中 / 合併 / 已結束 四段式分區 */
+.monitor-stage {
+	margin-bottom: 16px;
+}
+
+.monitor-stage-title {
+	padding: 6px 4px;
+	margin-bottom: 6px;
+	font-family: "Microsoft YaHei";
+	font-weight: bold;
+	font-size: 1.05rem;
+	color: #333;
+	border-left: 4px solid #009688;
+	padding-left: 10px;
+}
+
+.monitor-stage-count {
+	display: inline-block;
+	min-width: 22px;
+	padding: 0 6px;
+	margin-left: 6px;
+	font-size: 0.85rem;
+	font-weight: normal;
+	color: #fff;
+	text-align: center;
+	background-color: #009688;
+	border-radius: 10px;
+}
+
+#section_downloading .monitor-stage-title { border-left-color: #1E9FFF; }
+#section_downloading .monitor-stage-count { background-color: #1E9FFF; }
+#section_merging .monitor-stage-title { border-left-color: #FFB800; }
+#section_merging .monitor-stage-count { background-color: #FFB800; }
+#section_finished .monitor-stage-title { border-left-color: #999; }
+#section_finished .monitor-stage-count { background-color: #999; }

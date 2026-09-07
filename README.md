@@ -158,7 +158,7 @@ docker run -td --name anigamerplus \
     "download_resolution": "1080",  // 下載選取清晰度, 若該清晰度不存在將會選取最近可用清晰度, 可選 360 480 540 576 720 1080
     "lock_resolution": false,  // 鎖定清晰度, 如果指定清晰度不存在, 則放棄下載
     "only_use_vip": false,  // 鎖定 VIP 帳號下載
-    "default_download_mode": "latest",  // 預設下載模式, 另一可選參數為 all 和 largest-sn. latest 為僅下載最後一集, all 下載番劇全部劇集, largest-sn 下載最近上傳的一集
+    "default_download_mode": "latest",  // 預設下載模式, 可選 latest、all、resume、largest-sn。resume 會略過同名且大於 5 MB 的既有檔案
     "use_copyfile_method": false,  // 轉移影片至番劇資料夾時使用複製方法, 適用於儲存到 rclone 掛載盤的情況
     "multi-thread": 1,  // 最大並發下載數, 最高為 5, 超過將重置為 5
     "multi_upload": 3,  // 最大並發上傳數
@@ -413,8 +413,8 @@ sqlite3資料庫, 可以使用 [SQLite Expert](http://www.sqliteexpert.com/) 等
 參數:
 ```
 >python3 aniGamerPlus.py -h
-當前aniGamerPlus版本: v24.9.13
-usage: aniGamerPlus.py [-h] [--sn SN] [--resolution {360,480,540,576,720,1080}] [--download_mode {single,latest,largest-sn,multi,all,range,list,sn-list,sn-range,db}]
+當前aniGamerPlus版本: v24.9.14
+usage: aniGamerPlus.py [-h] [--sn SN] [--resolution {360,480,540,576,720,1080}] [--download_mode {single,latest,largest-sn,multi,all,resume,range,list,sn-list,sn-range,db}]
                        [--thread_limit THREAD_LIMIT] [--current_path] [--episodes EPISODES] [--no_classify] [--user_command] [--information_only] [--danmu] [--my_anime]
 
 optional arguments:
@@ -422,7 +422,7 @@ optional arguments:
   --sn SN, -s SN        影片sn碼(數字)
   --resolution {360,480,540,576,720,1080}, -r {360,480,540,576,720,1080}
                         指定下載清晰度(數字)
-  --download_mode {single,latest,largest-sn,multi,all,range,list,sn-list,sn-range,db}, -m {single,latest,largest-sn,multi,all,range,list,sn-list,sn-range,db}
+  --download_mode {single,latest,largest-sn,multi,all,resume,range,list,sn-list,sn-range,db}, -m {single,latest,largest-sn,multi,all,resume,range,list,sn-list,sn-range,db}
                         下載模式
   --thread_limit THREAD_LIMIT, -t THREAD_LIMIT
                         最高並發下載數(數字)

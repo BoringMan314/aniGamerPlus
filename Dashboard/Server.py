@@ -253,7 +253,7 @@ def extension_cookie():
     saved_cookies = Config.read_cookie(log=False) or {}
     if any(saved_cookies.get(name) != value for name, value in cookies.items()):
         return extension_response({'ok': False}, 500)
-    err_print(0, 'Cookie', '已從插件更新 cookie.txt', no_sn=True, status=2)
+    err_print(0, '', 'Cookie：已從插件更新 cookie.txt', no_sn=True, status=2)
     return extension_response({'ok': True})
 
 

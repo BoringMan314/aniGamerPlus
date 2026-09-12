@@ -54,6 +54,9 @@ class Anime:
         self._bangumi_name_orig = ''
         self._episode = ''
         self._episode_list = {}
+        # {sn: {'episode': 原始集數, 'category': '中文配音'／'特別篇'／''}}
+        # 補齊模式需用此資訊重建與實際下載完全相同的檔名。
+        self._episode_metadata = {}
         self._device_id = ''
         self._playlist = {}
         self._m3u8_dict = {}
@@ -150,16 +153,32 @@ class Anime:
         """與下載完成檔名相同規則，供監控中心顯示（含尚未開始下載的集）。"""
         listed_sn = int(listed_sn)
         res = str(resolution if resolution else self._settings['download_resolution'])
-        if listed_sn == int(self._sn):
-            return self.__get_filename(res)
         for ep, ep_sn in self.get_episode_list().items():
             if int(ep_sn) == listed_sn:
-                saved_sn, saved_ep = self._sn, self._episode
-                self._sn, self._episode = listed_sn, str(ep)
+                metadata = self._episode_metadata.get(listed_sn, {})
+                if not metadata and listed_sn == int(self._sn):
+                    return self.__get_filename(res)
+                saved_sn = self._sn
+                saved_ep = self._episode
+                saved_bangumi_name = self._bangumi_name
+                saved_bangumi_name_orig = self._bangumi_name_orig
+                episode = str(metadata.get('episode', ep))
+                category = str(metadata.get('category', '')).strip()
+                base_name = re.sub(r'\s+\[(?:特別篇|中文配音)\]$', '', saved_bangumi_name).rstrip()
+                self._sn, self._episode = listed_sn, episode
+                if category:
+                    self._bangumi_name = base_name + ' [' + category + ']'
+                    self._bangumi_name_orig = self._bangumi_name
+                else:
+                    self._bangumi_name = base_name
+                    self._bangumi_name_orig = base_name
                 try:
                     return self.__get_filename(res)
                 finally:
-                    self._sn, self._episode = saved_sn, saved_ep
+                    self._sn = saved_sn
+                    self._episode = saved_ep
+                    self._bangumi_name = saved_bangumi_name
+                    self._bangumi_name_orig = saved_bangumi_name_orig
         return 'sn=' + str(listed_sn)
 
     def __warmup_session(self):
@@ -183,7 +202,7 @@ class Anime:
             if attempt < max_retry - 1:
                 wait = base_delay + attempt
                 err_print(self._sn, label,
-                          f'驗證失敗，{wait}s 後重試 ({attempt + 1}/{max_retry})', display=False)
+                          f'驗證失敗，{wait}s 後重試 ({attempt + 1}/{max_retry})', status=3, display=False)
                 time.sleep(wait)
                 if attempt == warmup_retry_at:
                     self._session_warmed_up = False
@@ -274,16 +293,26 @@ class Anime:
         if self._settings['use_mobile_api']:
             for _type in self._src['data']['anime']['episodes']:
                 for _sn in self._src['data']['anime']['episodes'][_type]:
+                    sn = int(_sn['videoSn'])
+                    episode = str(_sn['episode'])
+                    category = ''
                     if _type == '0': # 本篇
-                        self._episode_list[str(_sn['episode'])] = int(_sn["videoSn"])
+                        key = episode
                     elif _type == '1': # 電影
-                        self._episode_list['電影'] = int(_sn["videoSn"])
+                        key = '電影'
+                        episode = '電影'
                     elif _type == '2': # 特別篇
-                        self._episode_list[f'特別篇{_sn["episode"]}'] = int(_sn["videoSn"])
+                        key = f'特別篇{episode}'
+                        category = '特別篇'
                     elif _type == '3': # 中文配音
-                        self._episode_list[f'中文配音{_sn["episode"]}'] = int(_sn["videoSn"])
+                        key = f'中文配音{episode}'
+                        category = '中文配音'
                     else: # 中文電影
-                        self._episode_list['中文電影'] = int(_sn["videoSn"])
+                        key = '中文電影'
+                        episode = '電影'
+                        category = '中文配音'
+                    self._episode_list[key] = sn
+                    self._episode_metadata[sn] = {'episode': episode, 'category': category}
         else:
             try:
                 a = self._src.find('section', 'season').find_all('a')
@@ -296,16 +325,26 @@ class Anime:
                     p = list(map(lambda x: x.contents[0], p))
                 for i in a:
                     sn = int(i['href'].replace('?sn=', ''))
-                    ep = str(i.string)
+                    episode = str(i.string)
+                    ep = episode
+                    category = ''
                     if ep not in index_counter.keys():
                         index_counter[ep] = 0
                     if ep in self._episode_list.keys():
                         index_counter[ep] = index_counter[ep] + 1
-                        ep = p[index_counter[ep]] + ep
+                        if index_counter[ep] < len(p):
+                            category = str(p[index_counter[ep]]).strip()
+                        ep = category + ep
                     self._episode_list[ep] = sn
+                    self._episode_metadata[sn] = {'episode': episode, 'category': category}
             except AttributeError:
                 # 當只有一集時，不存在劇集列表，self._episode_list 只有本身
                 self._episode_list[self._episode] = self._sn
+                category_match = re.search(r'\[(特別篇|中文配音)\]$', self._bangumi_name)
+                self._episode_metadata[self._sn] = {
+                    'episode': self._episode,
+                    'category': category_match.group(1) if category_match else ''
+                }
 
     def __init_header(self):
         # 偽裝為瀏覽器
@@ -399,10 +438,10 @@ class Anime:
                                       proxies=proxies)
             except (requests.exceptions.RequestException, curl_requests.RequestsError) as e:
                 if error_cnt >= max_retry >= 0:
-                    raise TryTooManyTimeError('任務狀態: sn=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s' % req)
-                err_detail = 'ERROR: 請求失敗！except：\n' + str(e) + '\n3s後重試(最多重試' + str(max_retry) + '次)'
+                    raise TryTooManyTimeError('任務狀態：SN=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s' % req)
+                err_detail = 'ERROR: 請求失敗！except：\n' + str(e) + '\n3s後重試 (最多重試' + str(max_retry) + '次)'
                 if show_fail:
-                    err_print(self._sn, '任務狀態', err_detail)
+                    err_print(self._sn, '任務狀態', err_detail, status=3)
                 time.sleep(3)
                 error_cnt += 1
             else:
@@ -434,7 +473,7 @@ class Anime:
                 # 回應 BAHARUNE=deleted
                 old_baharune = self._cookies.get('BAHARUNE')
                 fallback_cookies = dict(self._cookies or {})
-                err_print(self._sn, '收到cookie重置響應', display=False)
+                err_print(self._sn, 'Cookie：網站要求重設登入 Cookie', display=False)
 
                 # 以 Web Header 請求首頁嘗試取得新 BAHARUNE
                 previous_header = self._req_header
@@ -448,7 +487,7 @@ class Anime:
                     new_baharune = self._cookies.get('BAHARUNE')
                     if new_baharune and new_baharune != old_baharune:
                         Config.renew_cookies(self._cookies, log=False)
-                        err_print(0, '登入cookie已更新', detail='網站回應輪替，已寫回 cookie.txt', status=2, no_sn=True)
+                        err_print(0, '', 'Cookie：網站已輪替更新 cookie.txt', status=2, no_sn=True)
                         succeed_flag = True
                     else:
                         succeed_flag = False
@@ -467,16 +506,16 @@ class Anime:
                     try_counter = 0
                     while try_counter < 3:
                         file_cookies = Config.read_cookie() or {}
-                        err_print(self._sn, '讀取cookie',
-                                  'cookie.txt最後修改時間: ' + Config.get_cookie_time() + ' 第' + str(try_counter) + '次嘗試',
-                                  display=False)
+                        err_print(self._sn,
+                                  'Cookie：讀取 cookie.txt，最後修改時間 ' + Config.get_cookie_time()
+                                  + '，第 ' + str(try_counter) + ' 次嘗試', display=False)
                         new_baharune = file_cookies.get('BAHARUNE')
                         if new_baharune and old_baharune != new_baharune:
                             self._cookies = file_cookies
                             succeed_flag = True
-                            err_print(self._sn, '讀取cookie', '新cookie讀取成功', display=False)
+                            err_print(self._sn, 'Cookie：已讀取新的登入 Cookie', display=False)
                             break
-                        err_print(self._sn, '讀取cookie', '新cookie讀取失敗', display=False)
+                        err_print(self._sn, 'Cookie：無法讀取新的登入 Cookie', display=False)
                         time.sleep(random.uniform(2, 5))
                         try_counter += 1
 
@@ -485,13 +524,13 @@ class Anime:
                     file_cookies = Config.read_cookie() or {}
                     if file_cookies.get('BAHARUNE') or file_cookies.get('BAHAID'):
                         self._cookies = file_cookies
-                        err_print(0, '登入cookie刷新未完成，改用 cookie.txt 既有登入狀態', status=1, no_sn=True)
+                        err_print(0, 'Cookie：網站輪替未完成，改用 cookie.txt 既有登入 Cookie', status=3, no_sn=True)
                     elif fallback_cookies.get('BAHARUNE') or fallback_cookies.get('BAHAID'):
                         self._cookies = fallback_cookies
-                        err_print(0, '登入cookie刷新未完成，沿用記憶體登入狀態', status=1, no_sn=True)
+                        err_print(0, 'Cookie：網站輪替未完成，沿用記憶體中的登入 Cookie', status=3, no_sn=True)
                     else:
                         self._cookies = {}
-                        err_print(0, '登入cookie更新失敗，改以遊客身份訪問', status=1, no_sn=True)
+                        err_print(0, 'Cookie：網站輪替失敗，改以遊客身份訪問', status=1, no_sn=True)
                         Config.invalid_cookie()  # 清除 Config 記憶體 cookie 快取
 
             else:
@@ -503,7 +542,7 @@ class Anime:
                 # BAHARUNE 變更時寫入 cookie.txt
                 if old_baharune != new_baharune and new_baharune is not None:
                     Config.renew_cookies(self._cookies, log=False)
-                    err_print(0, '登入cookie已更新', detail='網站回應輪替，已寫回 cookie.txt', status=2, no_sn=True)
+                    err_print(0, '', 'Cookie：網站已輪替更新 cookie.txt', status=2, no_sn=True)
                     if self._settings['use_mobile_api']:
                         self._req_header = self._mobile_header
                         err_print(self._sn, '切換回 App Header 進行影片解析', display=False)
@@ -520,7 +559,7 @@ class Anime:
                 if attempt > max_retry:
                     raise TryTooManyTimeError('API 回應為空: ' + req)
                 if show_fail:
-                    err_print(self._sn, '任務狀態', 'API 回應為空，' + str(attempt) + 's 後重試', display=False)
+                    err_print(self._sn, '任務狀態', 'API 回應為空，' + str(attempt) + 's 後重試', status=3, display=False)
                 time.sleep(attempt)
                 continue
             try:
@@ -533,7 +572,7 @@ class Anime:
                     raise NonRetryableDownloadError(
                         'API 回應非 JSON (HTTP ' + str(code) + '): ' + preview)
                 if show_fail:
-                    err_print(self._sn, '任務狀態', 'API 回應非 JSON，重試中', display=False)
+                    err_print(self._sn, '任務狀態', 'API 回應非 JSON，重試中', status=3, display=False)
                 time.sleep(attempt)
 
     def __get_m3u8_dict(self):
@@ -897,13 +936,13 @@ class Anime:
             Config.update_task_monitor(self._sn, rate=progress_rate)
 
             if self.realtime_show_file_size:
-                sys.stdout.write('\r正在下載: sn=' + str(self._sn) + ' ' + filename + ' ' + str(progress_rate) + '%  ')
+                sys.stdout.write('\r正在下載：SN=' + str(self._sn) + ' ' + filename + ' ' + str(progress_rate) + '%  ')
                 sys.stdout.flush()
             limiter.release()
 
         if self.realtime_show_file_size:
             # 是否即時顯示檔案大小, 設計僅 cui 下載單個檔案或執行緒數=1時適用
-            sys.stdout.write('正在下載: sn=' + str(self._sn) + ' ' + filename)
+            sys.stdout.write('正在下載：SN=' + str(self._sn) + ' ' + filename)
             sys.stdout.flush()
         else:
             err_print(self._sn, '正在下載', filename + ' title=' + self._title)
@@ -1006,7 +1045,7 @@ class Anime:
         def check_ffmpeg_alive():
             # 應對ffmpeg卡死, 資源限速等，若 1min 中內檔案大小沒有增加超過 3M, 則判定卡死
             if self.realtime_show_file_size:  # 是否即時顯示檔案大小, 設計僅 cui 下載單個檔案或執行緒數=1時適用
-                sys.stdout.write('正在下載: sn=' + str(self._sn) + ' ' + filename)
+                sys.stdout.write('正在下載：SN=' + str(self._sn) + ' ' + filename)
                 sys.stdout.flush()
             else:
                 err_print(self._sn, '正在下載', filename + ' title=' + self._title)
@@ -1023,10 +1062,10 @@ class Anime:
                         size = size / float(1024 * 1024)
                         size = round(size, 2)
                         sys.stdout.write(
-                            '\r正在下載: sn=' + str(self._sn) + ' ' + filename + '    ' + str(size) + 'MB      ')
+                            '\r正在下載：SN=' + str(self._sn) + ' ' + filename + '    ' + str(size) + 'MB      ')
                         sys.stdout.flush()
                     else:
-                        sys.stdout.write('\r正在下載: sn=' + str(self._sn) + ' ' + filename + '    檔案尚未生成  ')
+                        sys.stdout.write('\r正在下載：SN=' + str(self._sn) + ' ' + filename + '    檔案尚未生成  ')
                         sys.stdout.flush()
 
                 if time_counter % 60 == 0 and os.path.exists(downloading_file):
@@ -1344,7 +1383,7 @@ class Anime:
                     break
 
             if not connect_flag:
-                err_print(self._sn, '上傳失敗', self._video_filename, status=1)
+                err_print(self._sn, '上傳未完成', self._video_filename + '，將於下次更新重試', status=3)
                 return connect_flag  # 如果連線失敗, 直接放棄
 
             ftp.voidcmd('TYPE I')  # 二進位制模式
@@ -1555,7 +1594,7 @@ class Anime:
                 try_counter = try_counter + 1
 
         if not self.upload_succeed_flag:
-            err_print(self._sn, '上傳失敗', self._video_filename + ' 放棄上傳!', status=1)
+            err_print(self._sn, '上傳未完成', self._video_filename + '，將於下次更新重試', status=3)
             exit_ftp()
             return self.upload_succeed_flag
 

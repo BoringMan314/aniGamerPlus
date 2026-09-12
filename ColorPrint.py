@@ -25,7 +25,7 @@ def read_log_settings():
     except BaseException as e:
         settings['save_logs'] = True
         settings['quantity_of_logs'] = 7
-        print('日誌配置讀取失敗, 將使用預設配置: 啟用日誌, 最多儲存7份 '+str(e))
+        print('日誌配置讀取失敗, 將使用預設配置: 啟用日誌, 最多儲存7份 '+str(e), flush=True)
     if 'save_logs' not in settings.keys():
         settings['save_logs'] = True
     if 'quantity_of_logs' not in settings.keys():
@@ -37,7 +37,7 @@ log_settings = read_log_settings()
 
 
 def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=True, display_time=True):
-    # status 三個設定值, 0 為一般輸出, 1 為錯誤輸出, 2 為成功輸出
+    # status 四個設定值, 0 為一般輸出, 1 為錯誤輸出, 2 為成功輸出, 3 為警告輸出
     # err_msg 為資訊型別/概要, 最好為四字中文
     # detail 為詳細資訊描述
     # no_sn 控制是否列印 sn , 預設列印
@@ -45,8 +45,6 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
     # display_time 是否顯示時間
     # 格式範例:
     # 2019-01-30 17:22:30 更新狀態: sn=12345 檢查更新失敗, 跳過等待下次檢查
-    green = False
-
     def should_use_windows_color_api():
         if platform.system() != 'Windows':
             return False
@@ -59,18 +57,18 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
         except BaseException:
             return True
 
-    def succeed_or_failed_print():
+    def color_print(color):
         if should_use_windows_color_api():
             clr = Color()
-            if green:
+            if color == 'green':
                 clr.print_green_text(msg)
+            elif color == 'yellow':
+                clr.print_yellow_text(msg)
             else:
                 clr.print_red_text(msg)
         else:
-            if green:
-                cprint(msg, 'green', attrs=['bold'])
-            else:
-                cprint(msg, 'red', attrs=['bold'])
+            cprint(msg, color, attrs=['bold'])
+            sys.stdout.flush()
 
     if display_time:
         msg = prefix + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + ' '
@@ -83,19 +81,17 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
         else:
             msg = msg + detail
     else:
-        msg = msg + err_msg + ': sn=' + str(sn) + '\t' + detail
+        msg = msg + err_msg + '：SN=' + str(sn) + (' ' + detail if detail else '')
 
     if display:
         if status == 0:
-            print(msg)
+            print(msg, flush=True)
         elif status == 1:
-            # 為 1 錯誤輸出
-            green = False
-            succeed_or_failed_print()
+            color_print('red')
+        elif status == 2:
+            color_print('green')
         else:
-            # 為 2 成功輸出
-            green = True
-            succeed_or_failed_print()
+            color_print('yellow')
 
     if log_settings['save_logs']:
         logs_dir = os.path.join(Config.get_working_dir(), 'logs')
@@ -131,10 +127,15 @@ class Color:
 
     def print_red_text(self, print_text):
         self.set_cmd_color(self.FOREGROUND_RED | self.FOREGROUND_INTENSITY)
-        print(print_text)
+        print(print_text, flush=True)
         self.reset_color()
 
     def print_green_text(self, print_text):
         self.set_cmd_color(self.FOREGROUND_GREEN | self.FOREGROUND_INTENSITY)
-        print(print_text)
+        print(print_text, flush=True)
+        self.reset_color()
+
+    def print_yellow_text(self, print_text):
+        self.set_cmd_color(self.FOREGROUND_RED | self.FOREGROUND_GREEN | self.FOREGROUND_INTENSITY)
+        print(print_text, flush=True)
         self.reset_color()

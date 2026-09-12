@@ -248,6 +248,7 @@ def _pipeline_fail(job, msg=None):
 def _pipeline_success(job):
     sn = job['sn']
     anime = job['anime']
+    upload_pending = False
 
     if job['type'] == 'worker' and not job.get('skip_db'):
         update_db(anime)
@@ -257,11 +258,12 @@ def _pipeline_success(job):
             upload_limiter.acquire()
             try:
                 if not anime.upload(job['sn_info']['tag']):
-                    err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.', status=1)
+                    upload_pending = True
                 else:
                     update_db(anime)
             except BaseException as e:
-                err_print(sn, '上傳異常', '發生未知錯誤: ' + str(e), status=1)
+                upload_pending = True
+                err_print(sn, '上傳未完成', '將於下次更新重試', status=3)
                 err_print(sn, '上傳異常', traceback.format_exc(), status=1, display=False)
             finally:
                 upload_limiter.release()
@@ -271,7 +273,8 @@ def _pipeline_success(job):
         if sn in processing_queue:
             processing_queue.remove(sn)
 
-    err_print(sn, '任務完成', status=2)
+    if not upload_pending:
+        err_print(sn, '任務完成', status=2)
     _release_download_sn(sn)
 
 
@@ -316,13 +319,12 @@ def _try_worker_upload_only(job):
     anime.video_resolution = anime_in_db['resolution']
     try:
         if not anime.upload(bangumi_tag):
-            err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 從任務佇列中移除, 等待下次更新重試.', status=1)
+            pass
         else:
             update_db(anime)
-            err_print(sn, '任務完成', status=2)
     except BaseException as e:
         err_print(sn, '上傳失敗', '異常詳情:\n' + traceback.format_exc(), status=1, display=False)
-        err_print(sn, '上傳失敗', 'title=\"' + anime.get_title() + '\" 發生未知錯誤, 等待下次更新重試: ' + str(e), status=1)
+        err_print(sn, '上傳未完成', '將於下次更新重試', status=3)
 
     upload_quit()
     _release_download_sn(sn)
@@ -803,11 +805,11 @@ def enqueue_sn_worker(sn, sn_info, realtime_show_file_size=False, want_danmu=Non
 
 def _print_batch_enqueue_summary(enqueued, skipped, cui_thread_limit):
     if skipped == 0:
-        print('所有下載任務已新增至佇列, 共 ' + str(enqueued) + ' 個任務, 執行緒數: ' + str(cui_thread_limit) + '\n')
+        print('所有下載任務已新增至佇列：共 ' + str(enqueued) + ' 個任務，執行緒數：' + str(cui_thread_limit) + '\n')
     elif enqueued == 0:
-        print('本次共 ' + str(skipped) + ' 個 SN 皆已在佇列或下載中, 執行緒數: ' + str(cui_thread_limit) + '\n')
+        print('本次：共 ' + str(skipped) + ' 個 SN 皆已在佇列或下載中，執行緒數：' + str(cui_thread_limit) + '\n')
     else:
-        print('佇列更新: 新增 ' + str(enqueued) + ' 個, 略過重複 ' + str(skipped) + ' 個, 執行緒數: ' + str(cui_thread_limit) + '\n')
+        print('佇列更新：新增 ' + str(enqueued) + ' 個，略過重複 ' + str(skipped) + ' 個，執行緒數：' + str(cui_thread_limit) + '\n')
 
 
 def find_completed_video_filenames(download_dir):
@@ -907,8 +909,6 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
         if anime['failed']:
             return
         anime = anime['anime']
-        _update_monitor_after_parse(anime, sn, cui_resolution, '正在解析番劇')
-
         bangumi_list = list(anime.get_episode_list().values())
         bangumi_list.sort()
         enqueued = 0
@@ -923,7 +923,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                 task.daemon = True
                 thread_tasks.append(task)
                 task.start()
-                print('新增查詢佇列: sn=' + str(anime_sn))
+                print('新增查詢佇列：SN=' + str(anime_sn))
             elif cui_download_mode == 'resume' and anime.get_monitor_filename_for_sn(
                     anime_sn, cui_resolution or None) in existing_filenames:
                 existing_file_skipped += 1
@@ -935,11 +935,11 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
             else:
                 duplicate_skipped += 1
         if get_info:
-            print('所有查詢任務已新增至佇列, 共 ' + str(len(bangumi_list)) + ' 個任務\n')
+            print('所有查詢任務已新增至佇列：共 ' + str(len(bangumi_list)) + ' 個任務\n')
         else:
             _print_batch_enqueue_summary(enqueued, duplicate_skipped, cui_thread_limit)
             if cui_download_mode == 'resume':
-                print('補齊模式略過既有大於 5 MB 檔案 ' + str(existing_file_skipped) + ' 個\n')
+                print('補齊模式：略過大於 5 MB 的既有檔案，共 ' + str(existing_file_skipped) + ' 個\n')
 
     elif cui_download_mode == 'range':
         if get_info:
@@ -964,7 +964,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     a.daemon = True
                     thread_tasks.append(a)
                     a.start()
-                    print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
+                    print('新增查詢佇列：SN=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + ep + ' 集')
                 elif enqueue_download_only(
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
                         monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None),
@@ -1003,7 +1003,7 @@ def __cui(sn, cui_resolution, cui_download_mode, cui_thread_limit, ep_range,
                     a.daemon = True
                     thread_tasks.append(a)
                     a.start()
-                    print('新增查詢佇列: sn=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
+                    print('新增查詢佇列：SN=' + str(ep_sn) + ' 《' + anime.get_bangumi_name() + '》 第 ' + episode_dict[ep_sn] + ' 集')
                 elif enqueue_download_only(
                         ep_sn, cui_resolution, cui_save_dir, realtime_show_file_size, classify,
                         monitor_filename=anime.get_monitor_filename_for_sn(ep_sn, cui_resolution or None),
@@ -1131,7 +1131,7 @@ def check_new_version():
     remote_version = Config.read_latest_version_on_github()
     if Config.parse_version(settings['aniGamerPlus_version']) < Config.parse_version(remote_version['tag_name']):
         msg = '發現GitHub上有新版本: '+remote_version['tag_name']+'\n更新內容:\n'+remote_version['body']+'\n'
-        err_print(0, msg, status=1, no_sn=True)
+        err_print(0, msg, status=3, no_sn=True)
 
 
 def __init_proxy():
@@ -1197,7 +1197,7 @@ def export_my_anime():
 
     cookies = Config.read_cookie()
     if not cookies:
-        err_print(0, "請先設定cookie後再執行此指令", status=1, no_sn=True)
+        err_print(0, "Cookie：未設定登入 Cookie，無法執行此指令", status=1, no_sn=True)
         return
 
     page = 1
@@ -1274,7 +1274,7 @@ if __name__ == '__main__':
     if settings['use_mobile_api'] and curl_requests is not None:
         err_print(0, '設定提醒',
                   'use_mobile_api 的 App UA 與 curl_cffi 瀏覽器指紋不一致, 可能提高 WAF 風控風險, 建議關閉',
-                  status=1, no_sn=True)
+                  status=3, no_sn=True)
 
     # 初始化 sqlite3 資料庫
     conn = sqlite3.connect(db_path)

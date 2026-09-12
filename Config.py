@@ -24,7 +24,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.14'
+aniGamerPlus_version = 'v24.9.15'
 latest_config_version = 17.5
 latest_database_version = 2.0
 cookie = None
@@ -37,6 +37,9 @@ _login_refresh_lock = threading.Lock()
 _login_refresh_pending = False
 _login_refresh_last_attempt = 0.0
 LOGIN_STATUS_REFRESH_COOLDOWN = 10
+COOKIE_REFRESH_INTERVAL_SECONDS = 60 * 60
+_cookie_refresh_worker_started = False
+_cookie_refresh_worker_lock = threading.Lock()
 login_status_cache = {'state': 'unknown', 'label': '', 'detail': ''}
 login_status_probe_mtime = None
 LOGIN_PROBE_SN = 878
@@ -47,7 +50,7 @@ _parse_sn_cd_gate = threading.Lock()
 _download_cd_cond = threading.Condition(threading.Lock())
 _download_cd_next_allowed = 0.0
 _download_cd_log_until = 0.0
-GUEST_COOKIE_DETAIL = 'cookie.txt 為空（請貼上瀏覽器 cookie）'
+GUEST_COOKIE_DETAIL = 'cookie.txt 為空'
 max_multi_thread = 5
 max_multi_downloading_segment = 5
 tasks_progress_rate = {}  # 儲存任務進度, 供面板使用,
@@ -185,7 +188,7 @@ def __color_print(sn, err_msg, detail='', status=0, no_sn=False, display=True):
 
 
 def __cookie_read_log(detail, status=0, display=True):
-    __color_print(0, '', detail='讀取cookie：' + detail, status=status, no_sn=True, display=display)
+    __color_print(0, '', detail='Cookie：' + detail, status=status, no_sn=True, display=display)
 
 
 def get_max_multi_thread():
@@ -207,10 +210,10 @@ def wait_parse_sn_cd(sn=None):
                     return
                 if not reported:
                     secs = int(wait) if wait == int(wait) else int(wait) + 1
-                    detail = 'SN 解析冷卻 ' + str(secs) + ' 秒'
                     if sn is not None:
-                        detail = 'SN=' + str(sn) + ' 解析冷卻 ' + str(secs) + ' 秒'
-                    __color_print(0, '更新資訊', detail, no_sn=True, status=0)
+                        __color_print(sn, '更新資訊', '解析冷卻 ' + str(secs) + ' 秒', status=0)
+                    else:
+                        __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
                     reported = True
                 _parse_sn_cd_cond.wait(timeout=wait)
     except BaseException:
@@ -1038,7 +1041,7 @@ def _load_cookie_from_disk(log=False):
             if os.path.getsize(cookie_path) == 0:
                 return None
             if log:
-                __cookie_read_log('發現cookie檔案', display=False)
+                __cookie_read_log('已發現 cookie.txt 檔案', display=False)
             with open(cookie_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f.readlines():
                     if line.isspace():
@@ -1048,7 +1051,7 @@ def _load_cookie_from_disk(log=False):
                         _empty_cookie_file()
                         return None
                     if log:
-                        __cookie_read_log('已讀取cookie', display=False)
+                        __cookie_read_log('已讀取 cookie.txt', display=False)
                     return cookies
             _empty_cookie_file()
             return None
@@ -1056,13 +1059,13 @@ def _load_cookie_from_disk(log=False):
             with open(cookie_path, 'w', encoding='utf-8') as f:
                 pass
             if log:
-                __cookie_read_log('已建立 cookie.txt，請貼上瀏覽器 cookie', status=0)
+                __cookie_read_log('已建立空 cookie.txt', status=0)
             return None
         except BaseException as e:
-            __cookie_read_log('無法建立 cookie.txt: ' + str(e), status=1)
+            __cookie_read_log('無法建立 cookie.txt ' + str(e), status=1)
             return None
     except BaseException as e:
-        __cookie_read_log('讀取 cookie.txt 失敗: ' + str(e), status=1)
+        __cookie_read_log('無法讀取 cookie.txt ' + str(e), status=1)
         _empty_cookie_file()
         return None
 
@@ -1082,7 +1085,7 @@ def read_cookie(log=False):
 
         if cookie is None and not _cookie_reload_suppress_notice:
             if log or user_edited_file:
-                __cookie_read_log('cookie.txt 檔案為空', status=1)
+                __cookie_read_log('cookie.txt 為空', status=3)
 
         if user_edited_file and not _cookie_reload_suppress_notice:
             if cookie:
@@ -1138,7 +1141,7 @@ def _persist_login_cookie_rotation(disk_cookies, merged_cookies, log=False, deta
         to_save.pop('nologinuser', None)
     renew_cookies(to_save, log=log)
     if log:
-        __color_print(0, '登入cookie已更新', detail=detail, status=2, no_sn=True)
+        __cookie_read_log(detail, status=2)
     return True
 
 
@@ -1206,11 +1209,11 @@ def probe_bahamut_login(sn=None, sync_cookie=True, sync_log=False):
             merged.update(_session_cookie_dict(session))
             _persist_login_cookie_rotation(
                 disk_cookies, merged, log=sync_log,
-                detail='啟動探測已同步網站輪替至 cookie.txt')
+                detail='網站已輪替更新 cookie.txt')
 
         if data.get('vip'):
             return 'vip', '已登入 VIP 帳戶'
-        return 'login', '非 VIP 帳戶'
+        return 'login', '已登入非 VIP 帳戶'
     except BaseException as e:
         return 'error', '登入檢查失敗: ' + str(e)
 
@@ -1265,7 +1268,9 @@ def report_login_status(sn=None, log=True):
         summary = '登入狀態：' + label
         if state in ('vip', 'login'):
             __color_print(0, '', detail=summary, status=2, no_sn=True)
-        elif state in ('guest', 'error'):
+        elif state == 'guest':
+            __color_print(0, '', detail=summary, status=3, no_sn=True)
+        elif state == 'error':
             __color_print(0, '', detail=summary, status=1, no_sn=True)
         else:
             __color_print(0, '', detail=summary, status=0, no_sn=True)
@@ -1292,10 +1297,34 @@ def get_login_status(for_dashboard=False):
     return dict(login_status_cache)
 
 
+def _cookie_refresh_worker():
+    """每小時探測一次網站，僅在 Cookie 輪替時寫回並顯示訊息。"""
+    while True:
+        time.sleep(COOKIE_REFRESH_INTERVAL_SECONDS)
+        try:
+            probe_bahamut_login(sync_cookie=True, sync_log=True)
+        except BaseException:
+            # probe_bahamut_login 已自行回傳探測錯誤；背景更新不額外干擾下載輸出。
+            pass
+
+
+def start_cookie_refresh_worker():
+    """每次程式啟動只建立一個 Cookie 定時更新執行緒。"""
+    global _cookie_refresh_worker_started
+    with _cookie_refresh_worker_lock:
+        if _cookie_refresh_worker_started:
+            return
+        _cookie_refresh_worker_started = True
+        threading.Thread(
+            target=_cookie_refresh_worker, daemon=True,
+            name='cookie-refresh-hourly').start()
+
+
 def startup_cookie_check():
     read_cookie(log=True)
     _ensure_sn_list_file(log=True)
     report_login_status()
+    start_cookie_refresh_worker()
 
 
 def test_cookie():
@@ -1343,14 +1372,14 @@ def renew_cookies(new_cookie, log=True):
                 f.write(new_cookie_str)
         except BaseException as e:
             if try_counter > 3:
-                __color_print(0, '新cookie儲存失敗! 發生異常: ' + str(e), status=1, no_sn=True)
+                __cookie_read_log('儲存 cookie.txt 失敗 ' + str(e), status=1)
                 break
             random_wait_time = random.uniform(2, 5)
             time.sleep(random_wait_time)
             try_counter = try_counter + 1
         else:
             if log:
-                __color_print(0, '新cookie儲存成功', no_sn=True, display=False)
+                __cookie_read_log('已儲存 cookie.txt', display=False)
             _cookie_reload_suppress_notice = True
             read_cookie(log=False)
             _refresh_login_status_async(log=False)

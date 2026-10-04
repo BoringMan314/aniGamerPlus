@@ -1,82 +1,105 @@
-﻿<h1 align="center">aniGamerPlus</h1>
+﻿# aniGamerPlus
 
-<p align="center">
- <img alt="GitHub" src="https://img.shields.io/github/license/BoringMan314/aniGamerPlus.svg?style=flat-square">
- <img alt="GitHub release" src="https://img.shields.io/github/release/BoringMan314/aniGamerPlus.svg?style=flat-square">
- <img alt="GitHub Release Date" src="https://img.shields.io/github/release-date/BoringMan314/aniGamerPlus.svg?style=flat-square">
- <img alt="GitHub all releases" src="https://img.shields.io/github/downloads/BoringMan314/aniGamerPlus/total.svg?style=flat-square">
-</p>
+[![GitHub](https://img.shields.io/badge/GitHub-aniGamerPlus-181717?logo=github)](https://github.com/BoringMan314/aniGamerPlus)
+[![GitHub release](https://img.shields.io/github/release/BoringMan314/aniGamerPlus)](https://github.com/BoringMan314/aniGamerPlus/releases)
+[![GitHub Release Date](https://img.shields.io/github/release-date/BoringMan314/aniGamerPlus)](https://github.com/BoringMan314/aniGamerPlus/releases)
+[![GitHub all releases](https://img.shields.io/github/downloads/BoringMan314/aniGamerPlus/total)](https://github.com/BoringMan314/aniGamerPlus/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Site](https://img.shields.io/badge/site-ani.gamer.com.tw-5865F2)](https://ani.gamer.com.tw)
 
-巴哈姆特動畫瘋自動下載工具, 可隨著番劇更新自動下載, 適合部署在全天開機的伺服器或NAS上.
+適用於 [巴哈姆特動畫瘋](https://ani.gamer.com.tw)（`ani.gamer.com.tw`）的自動下載工具：可隨番劇更新自動下載，適合部署在全天開機的伺服器或 NAS；同時支援命令列大批次下載（如下載整部番劇）。命令列模式支援顯示下載進度，但要求 **最大並發下載數** 設定為 **1**。
 
-同時支援命令列, 也適用於需要大批次下載的使用者, 如: 下載整部番劇. 命令列模式支援顯示下載進度, 但要求 **最大並發下載數** 設定為 **1** .
+*巴哈姆特动画疯自动下载工具，可随番剧更新自动下载，适合部署在全天开机的服务器或 NAS；亦支援命令列大批次下载。*<br>
+*バハムットアニメ瘋の自動ダウンロードツール。番組の更新に合わせて自動取得でき、常時稼働のサーバーや NAS 向け。コマンドラインでの一括ダウンロードにも対応。*<br>
+*Auto downloader for Bahamut Anime Crazy (`ani.gamer.com.tw`). Supports scheduled updates (server/NAS) and CLI batch downloads.*
 
-## **注意**:warning:
+> **聲明**：本專案為第三方輔助工具，與動畫瘋／巴哈姆特官方無關。使用請遵守該站服務條款與著作權規範。
+>
+> **依賴**：本專案依賴 **ffmpeg**，請事先放入系統 `PATH` 或本程式目錄。可至 [ffmpeg 下載頁](https://ffmpeg.org/download.html) 取得；若不熟悉 PATH，可直接將 **ffmpeg.exe** 放在與本程式同一資料夾。
+>
+> **警告**：[使用 Cookie 解析存在帳號被封鎖風險，不可解封，請三思後使用！](https://github.com/miyouzi/aniGamerPlus/issues/207)
 
-**本專案依賴ffmpeg, 請事先將ffmpeg放入系統PATH或者本程式目錄下!**
+---
 
-ffmpeg 需要另外下載, [**點選這裡前往下載頁**](https://ffmpeg.org/download.html). 若不知道如何將 ffmpeg 放入 PATH 則直接將 **ffmpeg.exe** 放在和本程式同一個資料夾下即可.
+![Web 控制面板主介面](screenshot/Dashboard_UI.png)
 
-:warning: [**使用 Cookie 解析存在帳號被封鎖風險，不可解封，請三思後使用！**](https://github.com/miyouzi/aniGamerPlus/issues/207) :warning:
+---
 
-## EXE 檔案執行(對於不熟悉Python的使用者)
+## 目錄
 
-windows 使用者可以[**點選這裡**](https://github.com/BoringMan314/aniGamerPlus/releases/latest)下載exe檔案使用.
+- [安裝方式](#安裝方式)
+- [特性](#特性)
+- [任務列表](#任務列表)
+- [配置說明](#配置說明)
+  - [主配置 config.json](#configjson)
+  - [使用代理](#使用代理)
+  - [下載模式說明](#下載模式說明)
+  - [使用 cookie](#cookietxt)
+  - [自動下載配置 sn_list.txt](#sn_listtxt)
+  - [任務狀態資料庫 aniGamer.db](#anigamerdb)
+- [命令列使用](#命令列使用)
+- [Web 控制面板（Dashboard）](#dashboard)
+- [鳴謝與第三方工具](#鳴謝與第三方工具)
+- [授權](#授權)
+- [問題與建議](#問題與建議)
 
-## 原始碼執行
+---
 
-Python 版本 **3.8～3.11**（建議 **3.11**，與 Release 打包一致）
+## 安裝方式
 
-下載原始碼
+### EXE 檔案執行（對於不熟悉 Python 的使用者）
+
+Windows 使用者可至 [Releases](https://github.com/BoringMan314/aniGamerPlus/releases/latest) 下載 exe 使用。
+
+### 原始碼執行
+
+Python 版本 **3.8～3.11**（建議 **3.11**，與 Release 打包一致）。
+
+下載原始碼：
+
 ```bash
 git clone https://github.com/miyouzi/aniGamerPlus.git
 ```
 
 **第一次使用前，進入原始碼所在資料夾，安裝依賴（重要）**
+
 ```bash
 cd aniGamerPlus
 pip3 install -r requirements.txt
 ```
 
-升級
+升級：
+
 ```bash
 git pull https://github.com/miyouzi/aniGamerPlus.git
 ```
 
-使用
+使用：
+
 ```bash
 python3 aniGamerPlus.py
 ```
 
-## Docker 執行
+### Docker 執行
 
-### (可選) 建構自己的 Image
-
-下載原始碼
+#### （可選）建構自己的 Image
 
 ```bash
 git clone https://github.com/miyouzi/aniGamerPlus.git
-```
-
-Build Image
-
-```bash
 docker build -t anigamerplus .
 ```
 
-## 下載官方 Image
+#### 下載官方 Image
 
-目前官方 Image 放在 `tonypepe/anigamerplus`
+目前官方 Image 放在 `tonypepe/anigamerplus`。
 
-使用前需在本地先建立好 config.json，並繫結 config.json 和下載目錄至 Container 內。
+使用前需在本地先建立好 `config.json`，並繫結 `config.json` 和下載目錄至 Container 內。
 
 注意：
 
-1. confg.json 中的 Dashboard Host 請設定成 `0.0.0.0`，切勿設定 `127.0.0.1`.
-2. config.json 勿設定下載目錄 `bangumi_dir: ""`，請保持為空，以免目錄繫結失敗。
-3. 可繫結 cookie.txt 至 `/app/cookie.txt`
-
-使用：
+1. `config.json` 中的 Dashboard Host 請設定成 `0.0.0.0`，切勿設定 `127.0.0.1`。
+2. `config.json` 勿設定下載目錄（保持 `"bangumi_dir": ""`），以免目錄繫結失敗。
+3. 可繫結 `cookie.txt` 至 `/app/cookie.txt`。
 
 ```bash
 docker run -td --name anigamerplus \
@@ -89,54 +112,38 @@ docker run -td --name anigamerplus \
 
 啟動後可至 `localhost:5000` 使用 [Dashboard](#dashboard)。
 
-## 鳴謝
-
-本專案 m3u8 取得模組參考自 [BahamutAnimeDownloader](https://github.com/c0re100/BahamutAnimeDownloader)
-
-## 第三方拓展工具
- - [aniGamerPlus-swapHistorySnList](https://github.com/chumicat/aniGamerPlus-swapHistorySnList)
-    - 將資料庫中的番劇匯出到sn_list, 可方便的與原來的sn_list相互切換, 適用於你想檢查過往番劇是否有更新時.
-
-## 目錄
-
-* [特性](#特性)
-* [注意](#注意warning)
-* [任務列表](#任務列表)
-* [配置說明](#配置說明)
-    * [主配置 config.json](#configjson)
-    * [使用代理](#使用代理)
-    * [下載模式說明](#下載模式說明)
-    * [使用 cookie](#cookietxt)
-    * [自動下載配置 sn_list.txt](#sn_listtxt)
-    * [任務狀態資料庫 aniGamer.db](#anigamerdb)
-* [命令列使用](#命令列使用)
-* [Web控制面板使用](#Dashboard)
+---
 
 ## 特性
 
- - 支援多執行緒下載
- - 支援cookie，支援下載 1080P
- - 下載模式有僅下載最新一集, 下載最新上傳, 下載全部可選.
- - 自訂檢查更新間隔時間
- - 自訂番劇下載目錄
- - 自訂下載檔名字首字尾及是否新增清晰度
- - 下載失敗, 下載過慢自動重啟任務
- - 支援使用FTP上傳至伺服器, 支援斷點續傳(適配Pure-Ftpd), 掉線重傳, 支援 FTP over TLS
- - 檢查程式更新功能
- - 支援新番分類
- - v6.0 開始支援cookie自動重新整理
- - v7.0 開始支援使用(鏈式)代理
- - v9.0 開始支援記錄日誌
- - v9.0 開始自動下載支援自訂番劇名
- - v16 支援向酷Q推送下載完成訊息
- - v16 支援將影片 metadata 前置, 此功能會在線上觀看時更快播放
- - v20 上線Web控制面板
- - v20.2 支援命令列下載時同時下載彈幕
+- 支援多執行緒下載
+- 支援 cookie，支援下載 1080P
+- 下載模式有僅下載最新一集、下載最新上傳、下載全部可選
+- 自訂檢查更新間隔時間
+- 自訂番劇下載目錄
+- 自訂下載檔名字首字尾及是否新增清晰度
+- 下載失敗、下載過慢自動重啟任務
+- 支援使用 FTP 上傳至伺服器，支援斷點續傳（適配 Pure-Ftpd）、掉線重傳、FTP over TLS
+- 檢查程式更新功能
+- 支援新番分類
+- v6.0 開始支援 cookie 自動重新整理
+- v7.0 開始支援使用（鏈式）代理
+- v9.0 開始支援記錄日誌
+- v9.0 開始自動下載支援自訂番劇名
+- v16 支援向酷Q推送下載完成訊息
+- v16 支援將影片 metadata 前置，此功能會在線上觀看時更快播放
+- v20 上線 Web 控制面板
+- v20.2 支援命令列下載時同時下載彈幕
+
+---
 
 ## 任務列表
- - [x] 下載使用代理
- - [x] 使用ftp上傳至遠端伺服器
- - [x] Web控制面板(持續完善中)
+
+- [x] 下載使用代理
+- [x] 使用 ftp 上傳至遠端伺服器
+- [x] Web 控制面板（持續完善中）
+
+---
 
 ## 配置說明
 
@@ -322,11 +329,11 @@ v8.0 影片下載模式新增分段下載, 其工作流程: 由 aniGamerPlus 讀
  - 將 UA 複製貼上到```config.json```的```ua```欄位
     ![](screenshot/how_to_use_my_ua.png)
 
-### 從 Chrome 插件取得 範例
+#### 從 Chrome 線上應用程式商店取得 Cookie（建議）
 
- - 請在 [Chrome Web Store](https://chromewebstore.google.com/) 搜尋 **「[[B.M] 動畫瘋 獲取 Cookie](https://chromewebstore.google.com/detail/bm-%E5%8B%95%E7%95%AB%E7%98%8B-%E7%8D%B2%E5%8F%96-cookie/mldicamgcdcfgdjibcojgfcnljooclen)」**，或點擊名稱從商店頁面安裝。
+請在 [Chrome Web Store](https://chromewebstore.google.com/) 搜尋 **「[\[B.M\] 動畫瘋 獲取 Cookie](https://chromewebstore.google.com/detail/bm-%E5%8B%95%E7%95%AB%E7%98%8B-%E7%8D%B2%E5%8F%96-cookie/mldicamgcdcfgdjibcojgfcnljooclen?hl=zh-TW)」**，或點擊名稱從商店頁面安裝。擴充功能可提供 Cookie 字串，供貼上至本程式之 `cookie.txt` 使用；建議以無痕視窗登入並勾選保持登入。
 
-    ![](screenshot/bm-ani-gamer-get-cookie_01.png)
+![透過 Chrome 擴充功能取得 Cookie](screenshot/bm-ani-gamer-get-cookie_01.png)
 
 ### sn_list.txt
 
@@ -401,6 +408,8 @@ sqlite3資料庫, 可以使用 [SQLite Expert](http://www.sqliteexpert.com/) 等
 截圖:
 ![](screenshot/db.png)
 
+
+---
 
 ## 命令列使用
 
@@ -523,6 +532,8 @@ optional arguments:
 
         ![](screenshot/cui_on_android.jpg)
 
+---
+
 ## Dashboard
 
 在 v20 版本首次啟用了 Web 控制面板, 相關配置在 ```config.json``` 的 ```dashboard``` 區段中.
@@ -551,12 +562,40 @@ Web 控制面板預設啟用, 預設埠 5000, 支援 SSL (https), 證書儲存�
 }
 ```
 
-Web控制面板截圖:
- - 主介面:
-    ![](screenshot/Dashboard_UI.png)
- - 手動任務:
-    ![](screenshot/Dashboard_manualTask.png)
- - 在線上編輯 sn_list
-    ![](screenshot/Dashboard_sn_list.png)
- - 控制面板輸出:
-    ![](screenshot/Dashboard_Console.png)
+Web 控制面板截圖：
+
+- 主介面：
+
+  ![](screenshot/Dashboard_UI.png)
+
+- 手動任務：
+
+  ![](screenshot/Dashboard_manualTask.png)
+
+- 在線上編輯 sn_list：
+
+  ![](screenshot/Dashboard_sn_list.png)
+
+- 控制面板輸出：
+
+  ![](screenshot/Dashboard_Console.png)
+
+---
+
+## 鳴謝與第三方工具
+
+本專案 m3u8 取得模組參考自 [BahamutAnimeDownloader](https://github.com/c0re100/BahamutAnimeDownloader)。
+
+- [aniGamerPlus-swapHistorySnList](https://github.com/chumicat/aniGamerPlus-swapHistorySnList)：將資料庫中的番劇匯出到 `sn_list`，可方便地與原來的 `sn_list` 相互切換，適用於檢查過往番劇是否有更新。
+
+---
+
+## 授權
+
+本專案以 [MIT License](LICENSE) 授權。
+
+---
+
+## 問題與建議
+
+歡迎透過 [GitHub Issues](https://github.com/BoringMan314/aniGamerPlus/issues) 回報錯誤或提出改善建議。

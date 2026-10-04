@@ -24,7 +24,7 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.15'
+aniGamerPlus_version = 'v24.9.16'
 latest_config_version = 17.5
 latest_database_version = 2.0
 cookie = None
@@ -76,6 +76,7 @@ def _copy_tasks_progress(src):
 
 def _new_task_entry(sn):
     return {'rate': 0, 'status': '等待下載', 'stage': STAGE_QUEUED,
+            'queued_at': time.monotonic(),
             'filename': format_task_monitor_filename(sn, '')}
 
 
@@ -144,6 +145,12 @@ def set_task_queued(sn, status, filename=None, rate=None):
     update_task_monitor(sn, rate=rate, status=status, filename=filename, stage=STAGE_QUEUED)
 
 
+def requeue_task(sn, status):
+    set_task_queued(sn, status, rate=0)
+    with tasks_progress_lock:
+        tasks_progress_rate[int(sn)]['queued_at'] = time.monotonic()
+
+
 def set_task_downloading(sn, filename=None, rate=None, status='正在下載'):
     update_task_monitor(sn, rate=rate, status=status, filename=filename, stage=STAGE_DOWNLOADING)
 
@@ -153,6 +160,10 @@ def set_task_merging(sn, filename=None, status='正在解密合併'):
 
 
 def set_task_failed(sn, status='任務失敗'):
+    update_task_monitor(sn, rate=0, status=status, stage=STAGE_FAILED)
+
+
+def set_task_cancelled(sn, status='已取消'):
     update_task_monitor(sn, rate=0, status=status, stage=STAGE_FAILED)
 
 
@@ -166,6 +177,16 @@ def remove_task_monitor(sn):
         tasks_progress_rate.pop(sn, None)
         _task_monitor_rate_throttle.pop(sn, None)
         _task_finished_at.pop(sn, None)
+
+
+def list_monitor_sns(stages=None):
+    """傳回監控中符合指定 stage 的 sn 清單；stages=None 表示全部。"""
+    with tasks_progress_lock:
+        if stages is None:
+            return list(tasks_progress_rate.keys())
+        wanted = set(stages)
+        return [sn for sn, entry in tasks_progress_rate.items()
+                if entry.get('stage') in wanted]
 
 
 def get_tasks_progress_rate():
@@ -195,10 +216,14 @@ def get_max_multi_thread():
     return max_multi_thread
 
 
-def wait_parse_sn_cd(sn=None):
-    """取得全域解析入口；解析與冷卻都必須逐一完成，避免多 worker 同時越過冷卻。"""
+def wait_parse_sn_cd(sn=None, batch=None):
+    """解析維持串行；同一次提交的批次只在首次解析等待冷卻。"""
     _parse_sn_cd_gate.acquire()
     try:
+        if batch is not None:
+            if batch.get('started'):
+                return
+            batch['started'] = True
         cd = int(read_settings().get('parse_sn_cd', 0))
         if cd <= 0:
             return
@@ -211,12 +236,14 @@ def wait_parse_sn_cd(sn=None):
                 if not reported:
                     secs = int(wait) if wait == int(wait) else int(wait) + 1
                     if sn is not None:
-                        __color_print(sn, '更新資訊', '解析冷卻 ' + str(secs) + ' 秒', status=0)
+                        __color_print(sn, '解析冷卻', '剩餘 ' + str(secs) + ' 秒', status=0)
                     else:
-                        __color_print(0, '更新資訊', 'SN 解析冷卻 ' + str(secs) + ' 秒', no_sn=True, status=0)
+                        __color_print(0, '解析冷卻', '剩餘 ' + str(secs) + ' 秒', no_sn=True, status=0)
                     reported = True
                 _parse_sn_cd_cond.wait(timeout=wait)
     except BaseException:
+        if batch is not None:
+            batch['started'] = False
         _parse_sn_cd_gate.release()
         raise
 
@@ -260,7 +287,8 @@ def wait_download_cd(on_wait=None):
             if wait <= 0:
                 return
             if now >= _download_cd_log_until:
-                __color_print(0, '下載冷卻', '下載冷卻剩餘 ' + str(int(wait) + 1) + ' 秒',
+                secs = int(wait) if wait == int(wait) else int(wait) + 1
+                __color_print(0, '下載冷卻', '剩餘 ' + str(secs) + ' 秒',
                               no_sn=True, status=0)
                 _download_cd_log_until = _download_cd_next_allowed
             _download_cd_cond.wait(timeout=min(wait, 5))

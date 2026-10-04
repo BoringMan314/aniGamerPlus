@@ -3,22 +3,15 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "EXE_OUT=aniGamerPlus.exe"
-set "RELEASE_VERSION=v24.9.15"
+set "RELEASE_VERSION=v24.9.16"
 set "ZIP_NAME=aniGamerPlus_%RELEASE_VERSION%_windows_64bit.zip"
 set "PIPY="
 
 echo [build_win10] Build Win10: %EXE_OUT% + dist\%ZIP_NAME%
-echo [build_win10] cleaning build/dist contents, exe in project root ^(upstream CI distpath^)
-taskkill /F /IM "%EXE_OUT%" /T >nul 2>&1
+echo [build_win10] keeping previous outputs until the new build succeeds
 
 if not exist "build" mkdir "build" 2>nul
 if not exist "dist" mkdir "dist" 2>nul
-call :clean_dir_contents "build"
-call :clean_dir_contents "dist"
-if exist "%EXE_OUT%" (
-  attrib -r "%EXE_OUT%" >nul 2>&1
-  del /f /q "%EXE_OUT%" >nul 2>&1
-)
 
 if not exist "%CD%\Dashboard\static\img\aniGamerPlus.ico" (
   echo [build_win10] FAIL: missing Dashboard\static\img\aniGamerPlus.ico
@@ -44,7 +37,7 @@ if errorlevel 1 goto :pip_fail
 %PIPY% -m pip install -q -r requirements.txt
 if errorlevel 1 goto :pip_fail
 
-%PIPY% -m pip install -q pyinstaller
+%PIPY% -m pip install -q --upgrade "pyinstaller>=6,<7"
 if errorlevel 1 goto :pip_fail
 goto :after_pip
 :pip_fail
@@ -52,16 +45,24 @@ echo [build_win10] FAIL: pip install
 goto :end_fail
 :after_pip
 
-echo [build_win10] PyInstaller ^(same flags as .github/workflows Release-build / Python-build^)
-echo [build_win10] distpath: %CD%\ ^(add-data: %CD% ^; aniGamerPlus/^)
-%PIPY% -m PyInstaller --noconfirm --distpath "%CD%" --onefile --console --icon "%CD%\Dashboard\static\img\aniGamerPlus.ico" --clean --add-data "%CD%;aniGamerPlus/" "%CD%\aniGamerPlus.py"
+echo [build_win10] PyInstaller version:
+%PIPY% -m PyInstaller --version
+echo [build_win10] staging executable in build\exe; bundling only Dashboard resources
+%PIPY% -m PyInstaller --noconfirm --distpath "%CD%\build\exe" --workpath "%CD%\build\pyinstaller" --specpath "%CD%\build" --onefile --console --icon "%CD%\Dashboard\static\img\aniGamerPlus.ico" --clean --add-data "%CD%\Dashboard;Dashboard" "%CD%\aniGamerPlus.py"
 if errorlevel 1 (
   echo [build_win10] FAIL: PyInstaller
   goto :end_fail
 )
 
-if not exist "%EXE_OUT%" (
+if not exist "build\exe\%EXE_OUT%" (
   echo [build_win10] FAIL: missing %EXE_OUT%
+  goto :end_fail
+)
+
+copy /y "build\exe\%EXE_OUT%" "%EXE_OUT%" >nul
+if errorlevel 1 (
+  echo [build_win10] FAIL: cannot replace %EXE_OUT%; close the running application and retry
+  echo [build_win10] new executable is available at build\exe\%EXE_OUT%
   goto :end_fail
 )
 
@@ -129,13 +130,6 @@ if not errorlevel 1 (
 echo [build_win10] FAIL: no Python 3.8+ ^(py launcher or python in PATH^)
 exit /b 1
 :find_ok
-exit /b 0
-
-:clean_dir_contents
-set "TGT=%~1"
-if not exist "%TGT%" exit /b 0
-for /f "delims=" %%D in ('dir /b /ad "%TGT%" 2^>nul') do rd /s /q "%TGT%\%%D" 2>nul
-del /f /q "%TGT%\*" 2>nul
 exit /b 0
 
 :end_fail

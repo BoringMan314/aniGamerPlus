@@ -158,7 +158,7 @@ docker run -td --name anigamerplus \
     "download_resolution": "1080",  // 下載選取清晰度, 若該清晰度不存在將會選取最近可用清晰度, 可選 360 480 540 576 720 1080
     "lock_resolution": false,  // 鎖定清晰度, 如果指定清晰度不存在, 則放棄下載
     "only_use_vip": false,  // 鎖定 VIP 帳號下載
-    "default_download_mode": "latest",  // 預設下載模式, 可選 latest、all、resume、largest-sn。resume 會略過同名且大於 5 MB 的既有檔案
+    "default_download_mode": "latest",  // 預設下載模式, 可選 latest、all、resume、largest-sn。resume 在下載前再次檢查，略過同集且大於 5 MB 的既有檔案（包含自訂名稱與不同解析度）
     "use_copyfile_method": false,  // 轉移影片至番劇資料夾時使用複製方法, 適用於儲存到 rclone 掛載盤的情況
     "multi-thread": 1,  // 最大並發下載數, 最高為 5, 超過將重置為 5
     "multi_upload": 3,  // 最大並發上傳數
@@ -262,6 +262,8 @@ v8.0 影片下載模式新增分段下載, 其工作流程: 由 aniGamerPlus 讀
 
 - 分段下載模式速度更快
 - 個別分段下載失敗會自動重試, 最多重試8次
+- 單集下載重試三次後仍失敗，會回到排隊末端並重新解析，繼續下一輪重試；解析及合併失敗也會重新排隊。明確禁止下載的條件（例如訪客模式不下載、地區限制）仍會停止任務。只要仍有重排任務，命令列就會繼續等待。
+- 解析冷卻以提交批次計算：同次手動或命令列任務（含全部、補齊、範圍、多 SN、清單模式）只在首次解析等待；自動追蹤以每輪更新為一批。批次內仍逐集取得播放資訊，下載冷卻另行計算；失敗重試或重新排隊會重新套用解析冷卻。
 - aniGamerPlus本身消耗的記憶體將略高於舊下載模式
 - aniGamerPlus本身效能消耗將會略高
 - 短時間內(解密合併階段)將會佔用2倍影片大小的磁碟空間
@@ -413,7 +415,7 @@ sqlite3資料庫, 可以使用 [SQLite Expert](http://www.sqliteexpert.com/) 等
 參數:
 ```
 >python3 aniGamerPlus.py -h
-當前aniGamerPlus版本: v24.9.15
+當前aniGamerPlus版本: v24.9.16
 usage: aniGamerPlus.py [-h] [--sn SN] [--resolution {360,480,540,576,720,1080}] [--download_mode {single,latest,largest-sn,multi,all,resume,range,list,sn-list,sn-range,db}]
                        [--thread_limit THREAD_LIMIT] [--current_path] [--episodes EPISODES] [--no_classify] [--user_command] [--information_only] [--danmu] [--my_anime]
 

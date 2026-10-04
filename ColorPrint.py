@@ -77,7 +77,7 @@ def err_print(sn, err_msg, detail='', status=0, no_sn=False, prefix='', display=
 
     if no_sn:
         if err_msg:
-            msg = msg + err_msg + (' ' + detail if detail else '')
+            msg = msg + (err_msg.rstrip(':： ') + '：' + detail if detail else err_msg)
         else:
             msg = msg + detail
     else:

@@ -36,6 +36,10 @@ template_path = os.path.join(Config.get_working_dir(), 'Dashboard', 'templates')
 static_path = os.path.join(Config.get_working_dir(), 'Dashboard', 'static')
 app = Flask(__name__, template_folder=template_path, static_folder=static_path)
 app.debug = False
+# Dashboard 模板/靜態檔常直接改磁碟內容；關閉快取避免必須重啟主程式才看得到按鈕
+app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.jinja_env.auto_reload = True
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 sockets = Sockets(app)
 
 EXTENSION_ORIGIN_PREFIX = 'chrome-extension://'
@@ -308,6 +312,45 @@ def manual_task():
     return jsonify({'status': '200'})
 
 
+def _pipeline_module():
+    # __main__ 與 aniGamerPlus 已別名為同一模組；優先取有控制函式的那個
+    for mod_name in ('__main__', 'aniGamerPlus'):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, 'cancel_task'):
+            return mod
+    import aniGamerPlus as mod
+    return mod
+
+
+@app.route('/task/pause_all', methods=['POST'])
+def task_pause_all():
+    mod = _pipeline_module()
+    data = request.get_json(silent=True) or {}
+    if data.get('resume'):
+        mod.resume_all_tasks()
+        paused = False
+    else:
+        mod.pause_all_tasks()
+        paused = True
+    return jsonify({'status': '200', 'paused': paused})
+
+
+@app.route('/task/cancel_all', methods=['POST'])
+def task_cancel_all():
+    result = _pipeline_module().cancel_all_tasks()
+    return jsonify({'status': '200', 'result': result})
+
+
+@app.route('/task/cancel', methods=['POST'])
+def task_cancel_one():
+    data = request.get_json(silent=True) or {}
+    sn = str(data.get('sn', '')).strip()
+    if not sn.isdigit():
+        return jsonify({'status': '400', 'error': 'invalid sn'}), 400
+    ok = _pipeline_module().cancel_task(int(sn))
+    return jsonify({'status': '200' if ok else '404', 'ok': ok})
+
+
 @app.route('/data/sn_list', methods=['GET'])
 def show_sn_list():
     return Config.get_sn_list_content()
@@ -332,6 +375,7 @@ def tasks_progress(ws):
             return
         body = {
             'tasks': Config.get_tasks_progress_rate(),
+            'control': _pipeline_module().get_pipeline_control_state(),
         }
         if tick == 1 or tick % 10 == 0:
             body['login'] = Config.get_login_status(for_dashboard=True)

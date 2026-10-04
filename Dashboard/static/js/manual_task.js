@@ -1,4 +1,5 @@
 var manualTaskInited = false;
+var manualSubmitOffline = false;
 
 function initManualTaskModal() {
 	if (!manualTaskInited) {
@@ -17,22 +18,63 @@ function initManualTaskModal() {
 	$.getJSON('data/config.json', function(data) {
 		$('#manual_thread_limit').val(data['multi-thread']);
 	});
+
+	// 主軟體離線後按鈕已鎖死；重新整理頁面才會重設 manualSubmitOffline
+	if (manualSubmitOffline) {
+		markManualSubmitFailed();
+	}
+}
+
+function resetManualSubmitBtn() {
+	var $btn = $('#manual_submit_btn');
+	if (!$btn.length || manualSubmitOffline) {
+		return;
+	}
+	$btn.prop('disabled', false)
+		.removeClass('btn-danger btn-secondary')
+		.addClass('btn-success')
+		.text('提交');
 }
 
 function flashManualSubmitOk() {
 	var $btn = $('#manual_submit_btn');
-	if (!$btn.length) {
+	if (!$btn.length || manualSubmitOffline) {
 		return;
 	}
-	$btn.prop('disabled', false).text('已提交');
+	$btn.prop('disabled', false)
+		.removeClass('btn-danger btn-secondary')
+		.addClass('btn-success')
+		.text('已提交');
 	setTimeout(function() {
-		if ($('#manualTasks').hasClass('show')) {
+		if (!manualSubmitOffline && $('#manualTasks').hasClass('show')) {
 			$btn.text('提交');
 		}
 	}, 3000);
 }
 
+function markManualSubmitFailed() {
+	manualSubmitOffline = true;
+	var $btn = $('#manual_submit_btn');
+	if (!$btn.length) {
+		return;
+	}
+	// 紅色「未提交」，並鎖死；須重開主軟體後重新整理頁面才恢復
+	$btn.prop('disabled', true)
+		.removeClass('btn-success btn-secondary')
+		.addClass('btn-danger')
+		.text('未提交');
+}
+
 function readManualConfig() {
+	if (manualSubmitOffline) {
+		return;
+	}
+
+	var $btn = $('#manual_submit_btn');
+	if ($btn.prop('disabled')) {
+		return;
+	}
+
 	var manualData = {};
 	var link = $('#manual_link').val();
 	if (link.length == 0) {
@@ -53,27 +95,34 @@ function readManualConfig() {
 	manualData['thread'] = $('#manual_thread_limit').val();
 	manualData['danmu'] = $('#manual_danmu').is(':checked');
 
-	// 樂觀提交：不等待伺服器，不入隊提示彈窗
-	$('#manual_link').val('').focus();
-	flashManualSubmitOk();
-	if (window.refreshTaskMonitor) {
-		window.refreshTaskMonitor();
-	}
+	// 送出前先鎖按鈕；成功才清空網址並顯示已提交，失敗則變紅色未提交且無法再按
+	$btn.prop('disabled', true)
+		.removeClass('btn-danger')
+		.addClass('btn-success')
+		.text('提交中…');
 
 	$.ajax({
 		url: '/manualTask',
 		type: 'post',
 		dataType: 'json',
-		timeout: 0,
+		timeout: 8000,
 		headers: {
 			'Content-Type': 'application/json;charset=utf-8'
 		},
 		contentType: 'application/json; charset=utf-8',
 		data: JSON.stringify(manualData),
 		success: function() {
+			if (manualSubmitOffline) {
+				return;
+			}
+			$('#manual_link').val('').focus();
+			flashManualSubmitOk();
 			if (window.refreshTaskMonitor) {
 				window.refreshTaskMonitor();
 			}
+		},
+		error: function() {
+			markManualSubmitFailed();
 		}
 	});
 }

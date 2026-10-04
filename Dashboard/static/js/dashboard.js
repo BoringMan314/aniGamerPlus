@@ -18,9 +18,11 @@
 		if (isMonitor) {
 			$('#page-settings').hide();
 			$('#page-monitor').show();
+			$('#monitor_nav_controls').css('display', 'inline-flex');
 		} else {
 			$('#page-monitor').hide();
 			$('#page-settings').show();
+			$('#monitor_nav_controls').hide();
 		}
 		$('.dashboard-nav-link').removeClass('active');
 		$('.dashboard-nav-link[data-page="' + page + '"]').addClass('active');

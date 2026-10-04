@@ -15,8 +15,13 @@
 			<li class="nav-item my-navbar">
 				<a class="nav-link" href="#" data-toggle="modal" data-target="#snList">sn_list</a>
 			</li>
-			<li class="nav-item my-navbar">
+			<li class="nav-item my-navbar dashboard-nav-actions">
 				<a class="nav-link dashboard-nav-action" href="#" data-toggle="modal" data-target="#manualTasks">新增手動任務</a>
+				<span class="monitor-nav-controls" id="monitor_nav_controls" style="display: none;">
+					<button type="button" class="nav-link dashboard-nav-action dashboard-nav-action-warning" id="btn_pause_all">全部暫停</button>
+					<button type="button" class="nav-link dashboard-nav-action dashboard-nav-action-danger" id="btn_cancel_all">全部取消</button>
+					<span class="monitor-pause-badge" id="monitor_pause_badge" style="display: none;">已暫停</span>
+				</span>
 			</li>
 		</ul>
 		<span id="login-status-badge" class="navbar-text ml-md-auto mt-2 mt-md-0" title=""></span>

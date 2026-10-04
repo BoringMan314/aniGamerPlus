@@ -35,6 +35,10 @@ class ResolutionNotFoundError(NonRetryableDownloadError):
     pass
 
 
+class TaskCancelledError(NonRetryableDownloadError):
+    pass
+
+
 class Anime:
     def __init__(self, sn, debug_mode=False, gost_port=34173):
         self._settings = Config.read_settings()
@@ -70,6 +74,8 @@ class Anime:
         self.upload_succeed_flag = False
         self._danmu = False
         self._proxies = {}
+        self._cancel_requested = False
+        self._ffmpeg_proc = None
 
         self.season_title_filter = re.compile('第[零一二三四五六七八九十]{1,3}季$')
         self.extra_title_filter = re.compile('\[(特別篇|中文配音)\]$')
@@ -91,6 +97,20 @@ class Anime:
             self.__get_episode()  # 提取劇集碼，str
             # 提取劇集列表，結構 {'episode': sn}，儲存到 self._episode_list, sn 為 int, 考慮到 劇場版 sp 等存在, key 為 str
             self.__get_episode_list()
+
+    def request_cancel(self):
+        """協作式取消：標記旗標並嘗試中止 ffmpeg。"""
+        self._cancel_requested = True
+        proc = self._ffmpeg_proc
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except BaseException:
+                pass
+
+    def raise_if_cancelled(self):
+        if getattr(self, '_cancel_requested', False):
+            raise TaskCancelledError('使用者取消')
 
     def __init_proxy(self):
         if self._settings['use_gost']:
@@ -149,15 +169,13 @@ class Anime:
         else:
             return self.__get_filename(str(self.video_resolution))
 
-    def get_monitor_filename_for_sn(self, listed_sn, resolution=None):
+    def get_monitor_filename_for_sn(self, listed_sn, resolution=None, rename=''):
         """與下載完成檔名相同規則，供監控中心顯示（含尚未開始下載的集）。"""
         listed_sn = int(listed_sn)
         res = str(resolution if resolution else self._settings['download_resolution'])
         for ep, ep_sn in self.get_episode_list().items():
             if int(ep_sn) == listed_sn:
                 metadata = self._episode_metadata.get(listed_sn, {})
-                if not metadata and listed_sn == int(self._sn):
-                    return self.__get_filename(res)
                 saved_sn = self._sn
                 saved_ep = self._episode
                 saved_bangumi_name = self._bangumi_name
@@ -173,6 +191,15 @@ class Anime:
                     self._bangumi_name = base_name
                     self._bangumi_name_orig = base_name
                 try:
+                    if listed_sn == int(saved_sn):
+                        self._bangumi_name = saved_bangumi_name
+                        self._bangumi_name_orig = saved_bangumi_name_orig
+                    if rename:
+                        name = self._bangumi_name
+                        versions = re.findall(r'\[.+?\]', name)
+                        if versions:
+                            name = name.replace(versions[-1], '').strip()
+                        self._bangumi_name = self._bangumi_name.replace(name, rename)
                     return self.__get_filename(res)
                 finally:
                     self._sn = saved_sn
@@ -290,6 +317,8 @@ class Anime:
                 get_ep()
 
     def __get_episode_list(self):
+        self._episode_list = {}
+        self._episode_metadata = {}
         if self._settings['use_mobile_api']:
             for _type in self._src['data']['anime']['episodes']:
                 for _sn in self._src['data']['anime']['episodes'][_type]:
@@ -315,26 +344,20 @@ class Anime:
                     self._episode_metadata[sn] = {'episode': episode, 'category': category}
         else:
             try:
-                a = self._src.find('section', 'season').find_all('a')
-                p = self._src.find('section', 'season').find_all('p')
-                # https://github.com/miyouzi/aniGamerPlus/issues/9
-                # 樣本 https://ani.gamer.com.tw/animeVideo.php?sn=10210
-                # 20190413 動畫瘋將特別篇分離
-                index_counter = {}  # 記錄劇集數字重複次數, 用作列表型別的索引 ('本篇', '特別篇')
-                if len(p) > 0:
-                    p = list(map(lambda x: x.contents[0], p))
-                for i in a:
-                    sn = int(i['href'].replace('?sn=', ''))
-                    episode = str(i.string)
-                    ep = episode
-                    category = ''
-                    if ep not in index_counter.keys():
-                        index_counter[ep] = 0
-                    if ep in self._episode_list.keys():
-                        index_counter[ep] = index_counter[ep] + 1
-                        if index_counter[ep] < len(p):
-                            category = str(p[index_counter[ep]]).strip()
-                        ep = category + ep
+                # 按 DOM 順序讀取分類標題與連結。各分類的集數不一定一樣，
+                # 不可用同集數出現次數推測分類（例如特別篇 5 集、中文配音 24 集）。
+                category = ''
+                for i in self._src.find('section', 'season').find_all(['p', 'a']):
+                    if i.name == 'p':
+                        heading = i.get_text(strip=True)
+                        category = '' if heading == '本篇' else heading
+                        continue
+                    match = re.search(r'[?&]sn=(\d+)', i.get('href', ''))
+                    if not match:
+                        continue
+                    sn = int(match.group(1))
+                    episode = i.get_text(strip=True)
+                    ep = category + episode
                     self._episode_list[ep] = sn
                     self._episode_metadata[sn] = {'episode': episode, 'category': category}
             except AttributeError:
@@ -913,6 +936,10 @@ class Anime:
             nonlocal failed_flag
 
             try:
+                if self._cancel_requested:
+                    failed_flag = True
+                    limiter.release()
+                    return
                 with open(chunk_local_path, 'wb') as f:
                     f.write(self.__request(uri, no_cookies=True,
                                            show_fail=False,
@@ -949,15 +976,23 @@ class Anime:
 
         chunk_tasks_list = []
         for chunk in chunk_list:
+            self.raise_if_cancelled()
             chunk_uri = url_path + '/' + chunk
             task = threading.Thread(target=download_chunk, args=(chunk_uri,))
             chunk_tasks_list.append(task)
             task.daemon = True
             limiter.acquire()
+            if self._cancel_requested:
+                limiter.release()
+                self.raise_if_cancelled()
             task.start()
 
         for task in chunk_tasks_list:  # 等待所有任務完成
             while True:
+                if self._cancel_requested:
+                    err_print(self._sn, '下載取消', filename, status=1)
+                    self.video_size = 0
+                    self.raise_if_cancelled()
                 if failed_flag:
                     err_print(self._sn, '下載失敗', filename, status=1)
                     self.video_size = 0
@@ -999,6 +1034,7 @@ class Anime:
         pending = self._pending_segment_merge
         if not pending:
             return False
+        self.raise_if_cancelled()
         self._pending_segment_merge = None
         self.__segment_merge_local(
             pending['resolution'],
@@ -1041,6 +1077,10 @@ class Anime:
 
         # subprocess.call(ffmpeg_cmd, creationflags=0x08000000)  # 僅windows
         run_ffmpeg = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=204800, stderr=subprocess.PIPE)
+        self._ffmpeg_proc = run_ffmpeg
+        if self._cancel_requested:
+            self.request_cancel()
+            self.raise_if_cancelled()
 
         def check_ffmpeg_alive():
             # 應對ffmpeg卡死, 資源限速等，若 1min 中內檔案大小沒有增加超過 3M, 則判定卡死
@@ -1054,6 +1094,12 @@ class Anime:
             time_counter = 1
             pre_temp_file_size = 0
             while run_ffmpeg.poll() is None:
+                if self._cancel_requested:
+                    try:
+                        run_ffmpeg.kill()
+                    except BaseException:
+                        pass
+                    return
 
                 if self.realtime_show_file_size:
                     # 即時顯示檔案大小
@@ -1085,7 +1131,9 @@ class Anime:
         ffmpeg_checker.daemon = True  # 如果 Anime 執行緒被 kill, 檢查執行緒也應該結束
         ffmpeg_checker.start()
         run = run_ffmpeg.communicate()
+        self._ffmpeg_proc = None
         return_str = str(run[1])
+        self.raise_if_cancelled()
 
         if self.realtime_show_file_size:
             sys.stdout.write('\n')
@@ -1203,13 +1251,17 @@ class Anime:
             except:
                 err_print(self._sn, 'Plex auto Refresh UNKNOWN ERROR', 'Exception: ' + str(e), status=1)
 
-    def download(self, resolution='', save_dir='', bangumi_tag='', realtime_show_file_size=False, rename='', classify=True, merge_after=True):
+    def download(self, resolution='', save_dir='', bangumi_tag='', realtime_show_file_size=False, rename='', classify=True, merge_after=True, resume=False):
         self.realtime_show_file_size = realtime_show_file_size
+        self._resume_skipped = False
+        self.raise_if_cancelled()
         if not resolution:
             resolution = self._settings['download_resolution']
 
         if save_dir:
             self._bangumi_dir = save_dir  # 用於 cui 使用者指定下載在當前目錄
+        else:
+            self._bangumi_dir = self._settings['bangumi_dir']
 
         # 預先保留原始標題
         self._bangumi_name_orig = self._title.replace('[' + self.get_episode() + ']', '').strip()  # 提取番劇名（去掉集數字尾）
@@ -1226,6 +1278,30 @@ class Anime:
             # 將其中的番劇名換成使用者設定的, 且不影響版本號字尾(如果有)
             self._title = self._title.replace(bangumi_name, rename)
             self._bangumi_name = self._bangumi_name.replace(bangumi_name, rename)
+
+        # 補齊以本集實際資訊與重新命名後的檔名判斷；解析度降級的成果也保留。
+        # 在取得串流前重新掃描，避免入列後才完成的檔案再次下載。
+        if resume:
+            candidates = {self.__get_filename(str(res)) for res in
+                          (resolution, 360, 480, 540, 576, 720, 1080)}
+            search_dir = self._bangumi_dir
+            if bangumi_tag:
+                search_dir = os.path.join(search_dir, Config.legalize_filename(bangumi_tag))
+            for root, _, files in os.walk(search_dir):
+                for filename in candidates.intersection(files):
+                    path = os.path.join(root, filename)
+                    try:
+                        size = os.path.getsize(path)
+                    except OSError:
+                        continue
+                    if size > 5 * 1024 * 1024:
+                        self.local_video_path = path
+                        self.video_size = size / (1024 * 1024)
+                        self._video_filename = filename
+                        self._resume_skipped = True
+                        Config.remove_task_monitor(self._sn)
+                        err_print(self._sn, '補齊略過', filename, status=2, display=False)
+                        return
 
         # 下載任務開始
         # 此時已佔用下載名額並通過冷卻, 歸在「下載中」區塊, 避免卡片在區塊間來回跳動

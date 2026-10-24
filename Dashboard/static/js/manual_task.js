@@ -1,5 +1,4 @@
 var manualTaskInited = false;
-var manualSubmitOffline = false;
 
 function initManualTaskModal() {
 	if (!manualTaskInited) {
@@ -18,16 +17,11 @@ function initManualTaskModal() {
 	$.getJSON('data/config.json', function(data) {
 		$('#manual_thread_limit').val(data['multi-thread']);
 	});
-
-	// 主軟體離線後按鈕已鎖死；重新整理頁面才會重設 manualSubmitOffline
-	if (manualSubmitOffline) {
-		markManualSubmitFailed();
-	}
 }
 
 function resetManualSubmitBtn() {
 	var $btn = $('#manual_submit_btn');
-	if (!$btn.length || manualSubmitOffline) {
+	if (!$btn.length) {
 		return;
 	}
 	$btn.prop('disabled', false)
@@ -38,7 +32,7 @@ function resetManualSubmitBtn() {
 
 function flashManualSubmitOk() {
 	var $btn = $('#manual_submit_btn');
-	if (!$btn.length || manualSubmitOffline) {
+	if (!$btn.length) {
 		return;
 	}
 	$btn.prop('disabled', false)
@@ -46,30 +40,25 @@ function flashManualSubmitOk() {
 		.addClass('btn-success')
 		.text('已提交');
 	setTimeout(function() {
-		if (!manualSubmitOffline && $('#manualTasks').hasClass('show')) {
+		if ($('#manualTasks').hasClass('show')) {
 			$btn.text('提交');
 		}
 	}, 3000);
 }
 
 function markManualSubmitFailed() {
-	manualSubmitOffline = true;
 	var $btn = $('#manual_submit_btn');
 	if (!$btn.length) {
 		return;
 	}
-	// 紅色「未提交」，並鎖死；須重開主軟體後重新整理頁面才恢復
-	$btn.prop('disabled', true)
+	// 請求失敗時保留網址並允許重試
+	$btn.prop('disabled', false)
 		.removeClass('btn-success btn-secondary')
 		.addClass('btn-danger')
-		.text('未提交');
+		.text('未提交，點擊重試');
 }
 
 function readManualConfig() {
-	if (manualSubmitOffline) {
-		return;
-	}
-
 	var $btn = $('#manual_submit_btn');
 	if ($btn.prop('disabled')) {
 		return;
@@ -95,7 +84,7 @@ function readManualConfig() {
 	manualData['thread'] = $('#manual_thread_limit').val();
 	manualData['danmu'] = $('#manual_danmu').is(':checked');
 
-	// 送出前先鎖按鈕；成功才清空網址並顯示已提交，失敗則變紅色未提交且無法再按
+	// 送出前先鎖按鈕；成功才清空網址，失敗則保留網址並允許重試
 	$btn.prop('disabled', true)
 		.removeClass('btn-danger')
 		.addClass('btn-success')
@@ -112,9 +101,6 @@ function readManualConfig() {
 		contentType: 'application/json; charset=utf-8',
 		data: JSON.stringify(manualData),
 		success: function() {
-			if (manualSubmitOffline) {
-				return;
-			}
 			$('#manual_link').val('').focus();
 			flashManualSubmitOk();
 			if (window.refreshTaskMonitor) {

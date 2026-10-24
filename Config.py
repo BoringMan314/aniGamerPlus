@@ -24,8 +24,8 @@ config_path = os.path.join(working_dir, 'config.json')
 sn_list_path = os.path.join(working_dir, 'sn_list.txt')
 cookie_path = os.path.join(working_dir, 'cookie.txt')
 logs_dir = os.path.join(working_dir, 'logs')
-aniGamerPlus_version = 'v24.9.16'
-latest_config_version = 17.5
+aniGamerPlus_version = 'v24.9.17'
+latest_config_version = 17.6
 latest_database_version = 2.0
 cookie = None
 cookie_loaded = False
@@ -412,6 +412,7 @@ def __init_settings():
                 'check_latest_version': True,  # 是否檢查新版本
                 'read_sn_list_when_checking_update': True,
                 'read_config_when_checking_update': True,
+                'enable_auto_tasks': True,
                 'ads_time': 25,
                 'mobile_ads_time': 25,
                 'use_dashboard': True,
@@ -469,6 +470,9 @@ def __update_settings(old_settings):  # 升級配置檔案
 
     if 'read_config_when_checking_update' not in new_settings.keys():  # v2.0 新增開關: 每次檢查更新時讀取config.json
         new_settings['read_config_when_checking_update'] = True
+
+    if 'enable_auto_tasks' not in new_settings.keys():
+        new_settings['enable_auto_tasks'] = True  # v17.6 新增自動任務開關，預設啟用
 
     if 'add_bangumi_name_to_video_filename' not in new_settings.keys():  # v3.0 新增開關, 檔名可以單純用劇集命名
         new_settings['add_bangumi_name_to_video_filename'] = True
@@ -863,6 +867,7 @@ def read_settings(config=''):
     settings.setdefault('download_resolution', '1080')
     settings.setdefault('video_filename_extension', 'mp4')
     settings.setdefault('faststart_movflags', False)
+    settings.setdefault('enable_auto_tasks', True)
 
     if settings['ftp'].get('port'):
         settings['ftp']['port'] = __coerce_int(settings['ftp']['port'], 0, minimum=0, maximum=65535)

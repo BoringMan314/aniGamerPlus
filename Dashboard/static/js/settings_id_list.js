@@ -22,10 +22,11 @@ var id_list = [
 	'check_latest_version', 
 	'read_sn_list_when_checking_update',
 	'read_config_when_checking_update', 
+	'enable_auto_tasks',
 	'save_logs', 
 	'quantity_of_logs',
 	'download_cd',
 	'parse_sn_cd',
-	'parse_max_retry',
-	'parse_retry_base_delay'
+	'parse_retry_base_delay',
+	'parse_max_retry'
 ]

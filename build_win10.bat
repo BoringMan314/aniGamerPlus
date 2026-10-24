@@ -3,15 +3,22 @@ setlocal EnableExtensions
 cd /d "%~dp0"
 
 set "EXE_OUT=aniGamerPlus.exe"
-set "RELEASE_VERSION=v24.9.16"
+set "RELEASE_VERSION=v24.9.17"
 set "ZIP_NAME=aniGamerPlus_%RELEASE_VERSION%_windows_64bit.zip"
 set "PIPY="
 
 echo [build_win10] Build Win10: %EXE_OUT% + dist\%ZIP_NAME%
-echo [build_win10] keeping previous outputs until the new build succeeds
+echo [build_win10] preserving dist directory and clearing its contents
 
 if not exist "build" mkdir "build" 2>nul
 if not exist "dist" mkdir "dist" 2>nul
+for /f "delims=" %%I in ('dir /a /b "dist" 2^>nul') do (
+  if exist "dist\%%I\." (
+    rd /s /q "dist\%%I"
+  ) else (
+    del /f /q "dist\%%I"
+  )
+)
 
 if not exist "%CD%\Dashboard\static\img\aniGamerPlus.ico" (
   echo [build_win10] FAIL: missing Dashboard\static\img\aniGamerPlus.ico
@@ -65,8 +72,6 @@ if errorlevel 1 (
   echo [build_win10] new executable is available at build\exe\%EXE_OUT%
   goto :end_fail
 )
-
-if exist "dist\%ZIP_NAME%" del /f /q "dist\%ZIP_NAME%"
 
 echo [build_win10] archiving ^(Release-build.yml file list: exe + Dashboard + samples + LICENSE + README^)
 

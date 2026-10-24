@@ -90,8 +90,10 @@ def build_anime(sn, want_danmu=None, parse_batch=None):
         if want_danmu:
             anime['anime'].enable_danmu()
 
-    except TryTooManyTimeError:
+    except TryTooManyTimeError as e:
         err_print(sn, '抓取失敗', '影片資訊抓取失敗!', status=1)
+        if _is_ssl_tls_failure(e) and not is_pipeline_paused():
+            _pause_after_ssl_retry_failure(sn, e)
     except BaseException as e:
         err_print(sn, '抓取失敗', '抓取影片資訊時發生未知錯誤: '+str(e), status=1)
         err_print(sn, '抓取異常', '異常詳情:\n'+traceback.format_exc(), status=1, display=False)
@@ -410,7 +412,7 @@ def _pipeline_download_once(job, merge_after):
             skip_download_cd = True
             return 'cancelled'
         Config.set_task_downloading(sn, rate=0)
-        _register_active_anime(sn, anime)
+        _register_active_anime(sn, anime, Config.STAGE_DOWNLOADING)
         try:
             _call_anime_download(anime, job, merge_after=merge_after)
         finally:
@@ -425,6 +427,9 @@ def _pipeline_download_once(job, merge_after):
         return 'fatal'
     except NonRetryableDownloadError as e:
         err_print(sn, '任務失敗', str(e), status=1)
+        if (re.search(r'\bcode\s*=\s*1007\b', str(e), re.IGNORECASE)
+                and not is_pipeline_paused()):
+            pause_all_tasks('偵測到裝置驗證異常(code=1007)')
         return 'fatal'
     except BaseException as e:
         if _is_cancelled(sn):
@@ -770,11 +775,26 @@ def is_pipeline_paused():
     return not _pipeline_run_event.is_set()
 
 
-def pause_all_tasks():
+def _is_ssl_tls_failure(error):
+    detail = type(error).__name__ + ' ' + str(error)
+    detail = detail.lower()
+    return any(marker in detail for marker in ('ssl', 'tls', 'handshake'))
+
+
+def _pause_after_ssl_retry_failure(sn, error):
+    if is_pipeline_paused():
+        return
+    pause_all_tasks('SSL/TLS 握手失敗達重試上限(SN=' + str(sn) + ')')
+
+
+def pause_all_tasks(reason=None):
     _pipeline_run_event.clear()
     for sn in Config.list_monitor_sns(stages=(Config.STAGE_QUEUED,)):
         Config.set_task_queued(sn, '已暫停')
-    err_print(0, '任務控制', '已全部暫停', no_sn=True, status=2)
+    message = '已全部暫停'
+    if reason:
+        message = reason + '，' + message
+    err_print(0, '任務控制', message, no_sn=True, status=2)
     return True
 
 
@@ -811,7 +831,10 @@ def _clear_cancel_flag(sn):
         _cancelled_sns.discard(int(sn))
 
 
-def _register_active_anime(sn, anime):
+def _register_active_anime(sn, anime, stage=None):
+    anime._pipeline_ssl_failure_callback = lambda error: _pause_after_ssl_retry_failure(sn, error)
+    if stage is not None:
+        anime._pipeline_pause_callback = lambda: _wait_if_paused(sn, resume_stage=stage)
     with _active_anime_lock:
         _active_anime_by_sn[int(sn)] = anime
 
@@ -821,13 +844,18 @@ def _unregister_active_anime(sn):
         _active_anime_by_sn.pop(int(sn), None)
 
 
-def _wait_if_paused(sn):
+def _wait_if_paused(sn, resume_stage=None):
     """暫停期間阻塞；期間若被取消則立刻返回 True。"""
+    paused = False
     while not _pipeline_run_event.is_set():
+        paused = True
         if _is_cancelled(sn):
             return True
         Config.set_task_queued(sn, '已暫停')
         _pipeline_run_event.wait(timeout=0.5)
+    if paused and resume_stage is not None and not _is_cancelled(sn):
+        status = '正在合併' if resume_stage == Config.STAGE_MERGING else '正在下載'
+        Config.update_task_monitor(sn, status=status, stage=resume_stage)
     return _is_cancelled(sn)
 
 
@@ -945,7 +973,7 @@ def _merge_worker_main():
                     _pipeline_fail(job, '使用者取消', cancelled=True)
                     continue
                 Config.set_task_merging(sn)
-                _register_active_anime(sn, anime)
+                _register_active_anime(sn, anime, Config.STAGE_MERGING)
                 try:
                     anime.raise_if_cancelled()
                     if not anime.merge_pending_segment():
@@ -1749,25 +1777,26 @@ if __name__ == '__main__':
     Config.startup_cookie_check()
 
     while True:
-        print()
-        err_print(0, '開始更新', no_sn=True)
-        Config.read_cookie(log=False)
-        if settings['read_sn_list_when_checking_update']:
-            sn_dict = Config.read_sn_list()
         if settings['read_config_when_checking_update']:
             apply_runtime_settings()
-        danmu = settings['danmu'] # 避免手動加入工作時，global 覆寫掉 config 的 danmu 設定
-        check_tasks()  # 檢查更新，生成任務佇列
-        new_tasks_counter = 0  # 新增任務計數器
-        if queue:
-            for task_sn in queue.keys():
-                if task_sn not in processing_queue:  # 如果該任務沒有在進行中，則啟動
-                    if enqueue_sn_worker(task_sn, queue[task_sn]):
-                        processing_queue.append(task_sn)
-                        new_tasks_counter = new_tasks_counter + 1
-        info = '本次更新新增了 '+str(new_tasks_counter)+' 個新任務, 目前佇列中共有 ' + str(len(processing_queue)) + ' 個任務'
-        err_print(0, '更新資訊', info, no_sn=True)
-        err_print(0, '更新結束', no_sn=True)
-        print()
+        if settings['enable_auto_tasks']:
+            print()
+            err_print(0, '開始更新', no_sn=True)
+            Config.read_cookie(log=False)
+            if settings['read_sn_list_when_checking_update']:
+                sn_dict = Config.read_sn_list()
+            danmu = settings['danmu'] # 避免手動加入工作時，global 覆寫掉 config 的 danmu 設定
+            check_tasks()  # 檢查更新，生成任務佇列
+            new_tasks_counter = 0  # 新增任務計數器
+            if queue:
+                for task_sn in queue.keys():
+                    if task_sn not in processing_queue:  # 如果該任務沒有在進行中，則啟動
+                        if enqueue_sn_worker(task_sn, queue[task_sn]):
+                            processing_queue.append(task_sn)
+                            new_tasks_counter = new_tasks_counter + 1
+            info = '本次更新新增了 '+str(new_tasks_counter)+' 個新任務, 目前佇列中共有 ' + str(len(processing_queue)) + ' 個任務'
+            err_print(0, '更新資訊', info, no_sn=True)
+            err_print(0, '更新結束', no_sn=True)
+            print()
         for i in range(settings['check_frequency'] * 60):
             time.sleep(1)  # cool down, 這麼寫是為了可以 Ctrl+C 馬上退出

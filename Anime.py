@@ -111,6 +111,11 @@ class Anime:
     def raise_if_cancelled(self):
         if getattr(self, '_cancel_requested', False):
             raise TaskCancelledError('使用者取消')
+        pause_callback = getattr(self, '_pipeline_pause_callback', None)
+        if pause_callback is not None:
+            pause_callback()
+        if getattr(self, '_cancel_requested', False):
+            raise TaskCancelledError('使用者取消')
 
     def __init_proxy(self):
         if self._settings['use_gost']:
@@ -461,7 +466,14 @@ class Anime:
                                       proxies=proxies)
             except (requests.exceptions.RequestException, curl_requests.RequestsError) as e:
                 if error_cnt >= max_retry >= 0:
-                    raise TryTooManyTimeError('任務狀態：SN=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s' % req)
+                    error_detail = type(e).__name__ + ': ' + str(e)
+                    if any(marker in error_detail.lower() for marker in ('ssl', 'tls', 'handshake')):
+                        pause_callback = getattr(self, '_pipeline_ssl_failure_callback', None)
+                        if pause_callback is not None:
+                            pause_callback(e)
+                    raise TryTooManyTimeError(
+                        '任務狀態：SN=' + str(self._sn) + ' 請求失敗次數過多！請求連結：\n%s\n最後錯誤：%s' %
+                        (req, error_detail))
                 err_detail = 'ERROR: 請求失敗！except：\n' + str(e) + '\n3s後重試 (最多重試' + str(max_retry) + '次)'
                 if show_fail:
                     err_print(self._sn, '任務狀態', err_detail, status=3)
